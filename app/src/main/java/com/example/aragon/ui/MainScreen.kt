@@ -63,6 +63,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val selectedModel by viewModel.selectedModel.collectAsStateWithLifecycle()
     val models by viewModel.models.collectAsStateWithLifecycle()
     val apiKey by viewModel.apiKey.collectAsStateWithLifecycle()
+    val endpoint by viewModel.endpoint.collectAsStateWithLifecycle()
     val autonomyLevel by viewModel.autonomyLevel.collectAsStateWithLifecycle()
     val maxIterations by viewModel.maxIterations.collectAsStateWithLifecycle()
     val temperature by viewModel.temperature.collectAsStateWithLifecycle()
@@ -201,13 +202,15 @@ fun MainScreen(viewModel: MainViewModel) {
                 )
                 AragonTab.SETTINGS -> SettingsScreen(
                     currentApiKey = apiKey,
+                    currentEndpoint = endpoint,
                     selectedModel = selectedModel,
                     autonomyLevel = autonomyLevel,
                     maxIterations = maxIterations,
                     temperature = temperature,
                     onSaveApiKey = { viewModel.saveApiKey(it) },
-                    onTestConnection = {
-                        viewModel.refreshModels()
+                    onSaveEndpoint = { viewModel.saveEndpoint(it) },
+                    onTestConnection = { testKey, testEndpoint ->
+                        viewModel.testConnection(testKey, testEndpoint)
                     },
                     onSelectModelClick = { showModelDialog = true },
                     onSaveAutonomyLevel = { viewModel.saveAutonomyLevel(it) },
