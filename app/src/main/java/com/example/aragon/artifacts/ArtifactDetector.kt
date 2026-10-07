@@ -65,8 +65,8 @@ class ArtifactDetector {
             return ArtifactStage.PRODUCT
         }
 
-        // Default: If in root workspace and valid document/data, treat as product, else process
-        return if (ext in listOf("png", "jpg", "jpeg", "csv", "json", "md")) {
+        // Default: If in workspace root/subdirectories and valid code/document/data, treat as product deliverable
+        return if (ext in listOf("py", "txt", "md", "csv", "json", "png", "jpg", "jpeg", "sh", "html", "css", "js", "ts", "sql", "xml", "yaml", "yml")) {
             ArtifactStage.PRODUCT
         } else {
             ArtifactStage.PROCESS
@@ -75,6 +75,7 @@ class ArtifactDetector {
 
     private fun isPreviewable(mime: String): Boolean {
         return mime.startsWith("text/") || mime.startsWith("image/") ||
-                mime.contains("json") || mime.contains("document") || mime.contains("pdf")
+                mime.contains("json") || mime.contains("document") || mime.contains("pdf") ||
+                mime.contains("python") || mime.contains("javascript") || mime.contains("markdown")
     }
 }

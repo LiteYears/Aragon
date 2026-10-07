@@ -39,13 +39,20 @@ class ProcessManager(
         if (executionBackendProvider?.invoke() == com.example.aragon.domain.model.ExecutionBackend.OPEN_SANDBOX) {
             val sandboxManager = openSandboxManagerProvider?.invoke()
             if (sandboxManager != null) {
-                val sbResult = sandboxManager.executeCommand(command, workingDir.absolutePath, timeoutMs)
+                val logicalWorkDir = when {
+                    workingDir.name == "workspace" -> "/workspace"
+                    workingDir.name == "artifacts" -> "/workspace/artifacts"
+                    workingDir.name == "process" -> "/workspace/process"
+                    workingDir.path.contains("/workspace") -> "/workspace/" + workingDir.path.substringAfter("/workspace").trimStart('/')
+                    else -> "/workspace"
+                }
+                val sbResult = sandboxManager.executeCommand(command, logicalWorkDir, timeoutMs)
                 return@withContext ProcessExecutionResult(
                     exitCode = sbResult.exitCode,
                     stdout = sbResult.stdout,
                     stderr = sbResult.stderr,
                     durationMs = sbResult.durationMs,
-                    workingDirectory = workingDir.absolutePath,
+                    workingDirectory = logicalWorkDir,
                     isSandbox = true
                 )
             }

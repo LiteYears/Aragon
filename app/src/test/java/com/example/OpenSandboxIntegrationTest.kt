@@ -197,4 +197,59 @@ class OpenSandboxIntegrationTest {
         assertEquals(0, spawnResult.exitCode)
         assertTrue(spawnResult.stdout.contains("Successfully spawned OpenSandbox instance"))
     }
+
+    @Test
+    fun `test Python script creation is preserved in both workspace and OpenSandbox microVM`() = runBlocking {
+        preferencesManager.setExecutionBackend(ExecutionBackend.OPEN_SANDBOX)
+
+        val processManager = ProcessManager(
+            openSandboxManagerProvider = { openSandboxManager },
+            executionBackendProvider = { preferencesManager.executionBackend.value }
+        )
+
+        val toolExecutor = ToolExecutor(
+            processManager = processManager,
+            openSandboxManager = openSandboxManager,
+            preferencesManager = preferencesManager
+        )
+
+        val pythonCode = """
+            # script: calculator.py
+            def calculate_metrics():
+                values = [10, 20, 30, 40]
+                total = sum(values)
+                print(f"Computed total: {total}")
+                with open("metrics_output.txt", "w") as f:
+                    f.write(f"Total: {total}\n")
+            
+            if __name__ == "__main__":
+                calculate_metrics()
+        """.trimIndent()
+
+        val result = toolExecutor.executeTool(
+            callId = "call_py_calc",
+            taskId = "task_test_calc",
+            toolName = "python_execute",
+            argumentsJson = org.json.JSONObject().put("code", pythonCode).put("path", "/workspace/calculator.py").toString(),
+            resolver = resolver
+        )
+
+        assertTrue("Execution must succeed", result.success)
+        assertEquals(0, result.exitCode)
+
+        // 1. Assert file exists on local disk in /workspace
+        val localScript = resolver.resolve("/workspace/calculator.py")
+        assertTrue("Python script must exist on local workspace", localScript.exists())
+        assertEquals(pythonCode, localScript.readText())
+
+        // 2. Assert file exists inside OpenSandbox microVM
+        val sbScriptRes = openSandboxManager.readFile("/workspace/calculator.py")
+        assertTrue("Python script must be created and readable in OpenSandbox microVM", sbScriptRes.isSuccess)
+        assertEquals(pythonCode, sbScriptRes.getOrThrow())
+
+        // 3. Assert generated output was created in OpenSandbox and synced to local workspace
+        val localOutput = resolver.resolve("/workspace/metrics_output.txt")
+        assertTrue("Output file must be synced to local workspace", localOutput.exists())
+        assertTrue(localOutput.readText().contains("Total: 100"))
+    }
 }

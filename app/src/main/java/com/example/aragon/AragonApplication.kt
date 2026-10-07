@@ -97,7 +97,8 @@ class AragonApplication : Application() {
             toolRegistry = toolRegistry,
             toolExecutor = toolExecutor,
             llmProvider = nimProvider,
-            preferencesManager = preferencesManager
+            preferencesManager = preferencesManager,
+            openSandboxManager = openSandboxManager
         )
     }
 

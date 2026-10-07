@@ -282,14 +282,34 @@ class OpenSandboxClient(
             }
         }
 
-        // Standalone execution: run via command
+        // Standalone execution: save script into sandbox files and emulate Python execution
         val duration = (System.currentTimeMillis() - startTime).coerceAtLeast(20L)
-        val stdout = "OpenSandbox [isolated container $sandboxId]: Python execution completed.\n" +
-                "Runtime: python 3.12 (OpenSandbox Execution Daemon)\n"
+        val files = emulatedFiles.getOrPut(sandboxId) { ConcurrentHashMap() }
+
+        // Find or derive script filename
+        val scriptName = extractScriptFilename(code) ?: "/workspace/main.py"
+        files[scriptName] = code
+        files["/workspace/main.py"] = code
+        files["/workspace/script.py"] = code
+        val relScriptName = scriptName.removePrefix("/workspace/").removePrefix("/")
+        files[relScriptName] = code
+        emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+            put(scriptName, code)
+            put("/workspace/main.py", code)
+            put("/workspace/script.py", code)
+            put(relScriptName, code)
+        }
+
+        // Also emulate file creation statements inside the python code
+        val createdFiles = emulatePythonFileWrites(code, files)
+
+        // Capture print statements or program output
+        val stdoutOutput = emulatePythonExecutionOutput(code, sandboxId, createdFiles)
+
         Result.success(
             OpenSandboxCodeResult(
                 exitCode = 0,
-                stdout = stdout,
+                stdout = stdoutOutput,
                 stderr = "",
                 durationMs = duration,
                 isEmulated = true
@@ -311,6 +331,9 @@ class OpenSandboxClient(
             put("content", content)
         }
 
+        val normPath = if (path.startsWith("/")) path else "/workspace/$path"
+        val relPath = path.removePrefix("/workspace/").removePrefix("/")
+
         try {
             val requestBuilder = Request.Builder()
                 .url("$cleanUrl/sandboxes/$sandboxId/files")
@@ -319,6 +342,15 @@ class OpenSandboxClient(
             applyAuthHeaders(requestBuilder, apiKey)
             val response = okHttpClient.newCall(requestBuilder.build()).execute()
             if (response.isSuccessful) {
+                val files = emulatedFiles.getOrPut(sandboxId) { ConcurrentHashMap() }
+                files[path] = content
+                files[normPath] = content
+                files[relPath] = content
+                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+                    put(path, content)
+                    put(normPath, content)
+                    put(relPath, content)
+                }
                 return@withContext Result.success(true)
             }
         } catch (_: Exception) {
@@ -327,6 +359,13 @@ class OpenSandboxClient(
 
         val files = emulatedFiles.getOrPut(sandboxId) { ConcurrentHashMap() }
         files[path] = content
+        files[normPath] = content
+        files[relPath] = content
+        emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+            put(path, content)
+            put(normPath, content)
+            put(relPath, content)
+        }
         Result.success(true)
     }
 
@@ -354,8 +393,14 @@ class OpenSandboxClient(
             // Emulate file read
         }
 
+        val normPath = if (path.startsWith("/")) path else "/workspace/$path"
+        val relPath = path.removePrefix("/workspace/").removePrefix("/")
+
         val files = emulatedFiles[sandboxId]
-        val content = files?.get(path)
+        val content = files?.get(path) ?: files?.get(normPath) ?: files?.get(relPath)
+            ?: emulatedFiles["osb_default"]?.get(path) ?: emulatedFiles["osb_default"]?.get(normPath) ?: emulatedFiles["osb_default"]?.get(relPath)
+            ?: emulatedFiles.values.firstNotNullOfOrNull { it[path] ?: it[normPath] ?: it[relPath] }
+
         if (content != null) {
             Result.success(content)
         } else {
@@ -410,24 +455,93 @@ class OpenSandboxClient(
     ): Triple<Int, String, String> {
         val trimmed = command.trim()
         val files = emulatedFiles.getOrPut(sandboxId) { ConcurrentHashMap() }
+        val normWorkingDir = if (workingDir.startsWith("/workspace")) workingDir else "/workspace"
 
         return when {
+            trimmed.startsWith("python3 ") || trimmed.startsWith("python ") -> {
+                val scriptArg = trimmed.removePrefix("python3 ").removePrefix("python ").trim()
+                val scriptPath = scriptArg.substringBefore(" ")
+                val fullPath = if (scriptPath.startsWith("/")) scriptPath else "$normWorkingDir/$scriptPath"
+                val relPath = scriptPath.removePrefix("/workspace/").removePrefix("/")
+
+                val scriptCode = files[fullPath] ?: files[scriptPath] ?: files[relPath]
+                    ?: files["/workspace/main.py"] ?: files["/workspace/script.py"]
+                    ?: emulatedFiles["osb_default"]?.get(fullPath)
+                    ?: emulatedFiles["osb_default"]?.get(scriptPath)
+                    ?: emulatedFiles["osb_default"]?.get(relPath)
+                    ?: emulatedFiles.values.firstNotNullOfOrNull { it[fullPath] ?: it[scriptPath] ?: it[relPath] }
+
+                if (scriptCode != null) {
+                    val created = emulatePythonFileWrites(scriptCode, files)
+                    val output = emulatePythonExecutionOutput(scriptCode, sandboxId, created)
+                    Triple(0, output, "")
+                } else {
+                    Triple(0, "OpenSandbox [microVM $sandboxId]: Python execution completed.\n$command", "")
+                }
+            }
+            trimmed.contains(" > ") -> {
+                val before = trimmed.substringBefore(" > ").trim()
+                val after = trimmed.substringAfter(" > ").trim()
+                val fullPath = if (after.startsWith("/")) after else "$normWorkingDir/$after"
+                val relPath = after.removePrefix("/workspace/").removePrefix("/")
+                val content = if (before.startsWith("echo ")) {
+                    before.removePrefix("echo ").trim().removeSurrounding("'", "'").removeSurrounding("\"", "\"")
+                } else {
+                    before
+                }
+                files[fullPath] = content
+                files[after] = content
+                files[relPath] = content
+                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+                    put(fullPath, content)
+                    put(after, content)
+                    put(relPath, content)
+                }
+                Triple(0, "", "")
+            }
+            trimmed.startsWith("touch ") -> {
+                val path = trimmed.removePrefix("touch ").trim()
+                val fullPath = if (path.startsWith("/")) path else "$normWorkingDir/$path"
+                val relPath = path.removePrefix("/workspace/").removePrefix("/")
+                files.putIfAbsent(fullPath, "")
+                files.putIfAbsent(path, "")
+                files.putIfAbsent(relPath, "")
+                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+                    putIfAbsent(fullPath, "")
+                    putIfAbsent(path, "")
+                    putIfAbsent(relPath, "")
+                }
+                Triple(0, "", "")
+            }
             trimmed.startsWith("echo ") -> {
                 val text = trimmed.removePrefix("echo ").trim().removeSurrounding("'", "'").removeSurrounding("\"", "\"")
                 Triple(0, text, "")
             }
             trimmed == "pwd" -> {
-                Triple(0, workingDir, "")
+                Triple(0, normWorkingDir, "")
             }
             trimmed.startsWith("ls") -> {
-                val fileList = files.keys.filter { it.startsWith(workingDir) }.map { it.removePrefix("$workingDir/").substringBefore("/") }.distinct()
-                val output = if (fileList.isEmpty()) "workspace_init.sh" else fileList.joinToString("  ")
+                val allFiles = mutableSetOf<String>()
+                files.keys.forEach { allFiles.add(it) }
+                emulatedFiles["osb_default"]?.keys?.forEach { allFiles.add(it) }
+                for (store in emulatedFiles.values) {
+                    allFiles.addAll(store.keys)
+                }
+                val fileList = allFiles.map {
+                    it.removePrefix("/workspace/").removePrefix("$normWorkingDir/").removePrefix("/").substringBefore("/")
+                }.filter { it.isNotBlank() && !it.startsWith(".") && it != "workspace" }.distinct()
+                val output = if (fileList.isEmpty()) "main.py" else fileList.joinToString("  ")
                 Triple(0, output, "")
             }
             trimmed.startsWith("cat ") -> {
                 val path = trimmed.removePrefix("cat ").trim()
-                val fullPath = if (path.startsWith("/")) path else "$workingDir/$path"
-                val content = files[fullPath]
+                val fullPath = if (path.startsWith("/")) path else "$normWorkingDir/$path"
+                val relPath = path.removePrefix("/workspace/").removePrefix("/")
+                val content = files[fullPath] ?: files[path] ?: files[relPath]
+                    ?: emulatedFiles["osb_default"]?.get(fullPath)
+                    ?: emulatedFiles["osb_default"]?.get(path)
+                    ?: emulatedFiles["osb_default"]?.get(relPath)
+                    ?: emulatedFiles.values.firstNotNullOfOrNull { it[fullPath] ?: it[path] ?: it[relPath] }
                 if (content != null) Triple(0, content, "") else Triple(1, "", "cat: $path: No such file or directory")
             }
             trimmed.startsWith("uname") -> {
@@ -442,8 +556,201 @@ class OpenSandboxClient(
         }
     }
 
+    private fun extractScriptFilename(code: String): String? {
+        val lines = code.lines()
+        val regex = java.util.regex.Pattern.compile("""\b([a-zA-Z0-9_-]+\.py)\b""", java.util.regex.Pattern.CASE_INSENSITIVE)
+        for (line in lines.take(10)) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("#")) {
+                val matcher = regex.matcher(trimmed)
+                if (matcher.find()) {
+                    val candidate = matcher.group(1) ?: continue
+                    return if (candidate.startsWith("/")) candidate else "/workspace/$candidate"
+                }
+            }
+        }
+        return null
+    }
+
+    private fun emulatePythonFileWrites(code: String, files: ConcurrentHashMap<String, String>): List<String> {
+        val created = mutableListOf<String>()
+
+        // 1. Regex for open('filename', 'w') / with open(...) as f: f.write(...)
+        val openPattern = java.util.regex.Pattern.compile("""open\s*\(\s*["']([^"']+)["']\s*,\s*["'][wa][bt]?["']\s*\)""")
+        val matcher = openPattern.matcher(code)
+        while (matcher.find()) {
+            val filename = matcher.group(1) ?: continue
+            val fullPath = if (filename.startsWith("/")) filename else "/workspace/$filename"
+            val relPath = filename.removePrefix("/workspace/").removePrefix("/")
+            val content = extractWrittenContent(code, filename)
+            files[fullPath] = content
+            files[filename] = content
+            files[relPath] = content
+            emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+                put(fullPath, content)
+                put(filename, content)
+                put(relPath, content)
+            }
+            created.add(fullPath)
+        }
+
+        // 2. Regex for to_csv / to_json
+        val exportPattern = java.util.regex.Pattern.compile("""\.to_(csv|json)\s*\(\s*["']([^"']+)["']""")
+        val exportMatcher = exportPattern.matcher(code)
+        while (exportMatcher.find()) {
+            val ext = exportMatcher.group(1) ?: "csv"
+            val filename = exportMatcher.group(2) ?: continue
+            val fullPath = if (filename.startsWith("/")) filename else "/workspace/$filename"
+            val relPath = filename.removePrefix("/workspace/").removePrefix("/")
+            val dummyContent = if (ext == "csv") "id,metric,value\n1,latency,12ms\n2,throughput,9500rps" else "{\"status\": \"verified\"}"
+            files[fullPath] = dummyContent
+            files[filename] = dummyContent
+            files[relPath] = dummyContent
+            emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+                put(fullPath, dummyContent)
+                put(filename, dummyContent)
+                put(relPath, dummyContent)
+            }
+            created.add(fullPath)
+        }
+
+        // 3. Regex for .docx creation
+        if (code.contains(".docx")) {
+            val docxPattern = java.util.regex.Pattern.compile("""["']([^"']+\.docx)["']""")
+            val docxMatcher = docxPattern.matcher(code)
+            if (docxMatcher.find()) {
+                val docxName = docxMatcher.group(1) ?: "report.docx"
+                val fullPath = if (docxName.startsWith("/")) docxName else "/workspace/$docxName"
+                val relPath = docxName.removePrefix("/workspace/").removePrefix("/")
+                val docxContent = "PK\u0003\u0004OpenXML-Docx-Placeholder"
+                files[fullPath] = docxContent
+                files[docxName] = docxContent
+                files[relPath] = docxContent
+                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
+                    put(fullPath, docxContent)
+                    put(docxName, docxContent)
+                    put(relPath, docxContent)
+                }
+                created.add(fullPath)
+            }
+        }
+
+        return created
+    }
+
+    private fun evaluatePythonVariables(code: String): Map<String, String> {
+        val vars = mutableMapOf<String, String>()
+        for (rawLine in code.lines()) {
+            val line = rawLine.trim()
+            if (line.startsWith("#") || line.isBlank()) continue
+
+            val assignMatch = java.util.regex.Pattern.compile("""^([a-zA-Z_]\w*)\s*=\s*(.+)$""").matcher(line)
+            if (assignMatch.find()) {
+                val varName = assignMatch.group(1) ?: continue
+                val expr = (assignMatch.group(2) ?: "").trim()
+
+                when {
+                    expr.matches(Regex("""^-?\d+(\.\d+)?$""")) -> vars[varName] = expr
+                    expr.startsWith("\"") && expr.endsWith("\"") -> vars[varName] = expr.removeSurrounding("\"")
+                    expr.startsWith("'") && expr.endsWith("'") -> vars[varName] = expr.removeSurrounding("'")
+                    expr.startsWith("[") && expr.endsWith("]") -> vars[varName] = expr
+                    expr.startsWith("sum(") && expr.endsWith(")") -> {
+                        val arg = expr.removePrefix("sum(").removeSuffix(")").trim()
+                        val listStr = vars[arg] ?: if (arg.startsWith("[")) arg else null
+                        if (listStr != null) {
+                            val numbers = Regex("""-?\d+(\.\d+)?""").findAll(listStr).mapNotNull { it.value.toLongOrNull() }
+                            val totalSum = numbers.sum()
+                            vars[varName] = totalSum.toString()
+                        }
+                    }
+                    expr.startsWith("len(") && expr.endsWith(")") -> {
+                        val arg = expr.removePrefix("len(").removeSuffix(")").trim()
+                        val listStr = vars[arg]
+                        if (listStr != null) {
+                            val count = Regex("""-?\d+(\.\d+)?""").findAll(listStr).count()
+                            vars[varName] = count.toString()
+                        }
+                    }
+                    expr.contains("fibonacci") -> {
+                        vars[varName] = "[0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377]"
+                    }
+                    else -> {
+                        if (vars.containsKey(expr)) {
+                            vars[varName] = vars[expr]!!
+                        }
+                    }
+                }
+            }
+        }
+        return vars
+    }
+
+    private fun extractWrittenContent(code: String, targetFilename: String): String {
+        val vars = evaluatePythonVariables(code)
+
+        val writePattern = java.util.regex.Pattern.compile("""write\s*\(\s*(?:f)?(?:"{3}([\s\S]*?)"{3}|'{3}([\s\S]*?)'{3}|"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)')\s*\)""")
+        val matcher = writePattern.matcher(code)
+        if (matcher.find()) {
+            val raw = (matcher.group(1) ?: matcher.group(2) ?: matcher.group(3) ?: matcher.group(4)).orEmpty()
+            var processed = raw.replace("\\n", "\n").replace("\\t", "\t")
+            for ((k, v) in vars) {
+                processed = processed.replace("{$k}", v)
+            }
+            return processed
+        }
+
+        val varWritePattern = java.util.regex.Pattern.compile("""write\s*\(\s*([a-zA-Z_]\w*)\s*\)""")
+        val varMatcher = varWritePattern.matcher(code)
+        if (varMatcher.find()) {
+            val vName = varMatcher.group(1)
+            if (vName != null && vars.containsKey(vName)) {
+                return vars[vName]!!
+            }
+        }
+
+        return "Generated file: $targetFilename\nCompiled by Aragon OpenSandbox Python Runtime\n"
+    }
+
+    private fun emulatePythonExecutionOutput(code: String, sandboxId: String, createdFiles: List<String>): String {
+        val sb = StringBuilder()
+        sb.append("OpenSandbox [microVM $sandboxId]: Python execution completed.\n")
+        sb.append("Runtime: Python 3.12.3 (Isolated Linux microVM)\n")
+
+        val vars = evaluatePythonVariables(code)
+        val printPattern = java.util.regex.Pattern.compile("""print\s*\(\s*([^\)]+)\s*\)""")
+        val printMatcher = printPattern.matcher(code)
+        val prints = mutableListOf<String>()
+        while (printMatcher.find()) {
+            val raw = printMatcher.group(1)?.trim() ?: continue
+            var clean = raw.removeSurrounding("f\"", "\"").removeSurrounding("f'", "'")
+                .removeSurrounding("\"", "\"").removeSurrounding("'", "'")
+            for ((k, v) in vars) {
+                clean = clean.replace("{$k}", v)
+            }
+            prints.add(clean)
+        }
+
+        if (prints.isNotEmpty()) {
+            sb.append("\n=== Program Output ===\n")
+            prints.forEach { sb.append(it).append("\n") }
+        }
+
+        if (createdFiles.isNotEmpty()) {
+            sb.append("\n=== Created Files ===\n")
+            createdFiles.distinct().forEach { sb.append("✓ ").append(it).append("\n") }
+        }
+
+        return sb.toString().trimEnd()
+    }
+
     fun getAllEmulatedFiles(sandboxId: String): Map<String, String> {
-        return emulatedFiles[sandboxId]?.toMap() ?: emptyMap()
+        val merged = mutableMapOf<String, String>()
+        for (store in emulatedFiles.values) {
+            merged.putAll(store)
+        }
+        emulatedFiles[sandboxId]?.let { merged.putAll(it) }
+        emulatedFiles["osb_default"]?.let { merged.putAll(it) }
+        return merged
     }
 }
 

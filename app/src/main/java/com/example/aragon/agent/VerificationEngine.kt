@@ -60,7 +60,7 @@ class VerificationEngine {
                 )
             )
         }
-        if (req.contains(".py") || req.contains("python script")) {
+        if (req.contains(".py") || req.contains("python") || req.contains("script")) {
             list.add(
                 GoalCriterion(
                     id = "crit_python",
@@ -157,7 +157,7 @@ class VerificationEngine {
         }
 
         // 4. Code / Script Objective
-        val expectedPython = request.contains(".py") || request.contains("python script")
+        val expectedPython = request.contains(".py") || request.contains("python") || request.contains("script")
         if (expectedPython) {
             val pyFiles = findFilesWithExtension(resolver, "py")
             if (pyFiles.isEmpty()) {

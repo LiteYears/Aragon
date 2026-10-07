@@ -31,6 +31,7 @@ class AgentHarness(
     private val toolExecutor: ToolExecutor,
     private val llmProvider: LlmProvider,
     private val preferencesManager: PreferencesManager,
+    private val openSandboxManager: com.example.aragon.opensandbox.OpenSandboxManager? = null,
     val approvalManager: ApprovalManager = ApprovalManager(),
     val toolDispatcher: ToolDispatcher = ToolDispatcher(toolExecutor, approvalManager, toolRegistry),
     val orchestrator: SessionOrchestrator = SessionOrchestrator(
@@ -46,7 +47,8 @@ class AgentHarness(
         toolDispatcher = toolDispatcher,
         llmProvider = llmProvider,
         preferencesManager = preferencesManager,
-        approvalManager = approvalManager
+        approvalManager = approvalManager,
+        openSandboxManager = openSandboxManager
     )
 ) {
     fun startTask(taskId: String) {

@@ -180,15 +180,40 @@ class OpenSandboxManager(
     suspend fun syncSandboxToLocal(resolver: com.example.aragon.computer.WorkspacePathResolver): List<java.io.File> = withContext(Dispatchers.IO) {
         val sandboxId = _activeSandbox.value?.id ?: preferencesManager.openSandboxActiveId.value ?: "osb_default"
         val synced = mutableListOf<java.io.File>()
+
+        // 1. Sync from memory / emulated sandbox filesystem
         val emulated = client.getAllEmulatedFiles(sandboxId)
         for ((logicalPath, content) in emulated) {
             val target = resolver.resolve(logicalPath)
             target.parentFile?.mkdirs()
             if (!target.exists() || target.readText() != content) {
-                target.writeText(content)
+                target.writeText(content, Charsets.UTF_8)
                 synced.add(target)
             }
         }
+
+        // 2. If connected to a live cluster, query and sync live workspace files
+        val current = _activeSandbox.value
+        if (current != null && !current.isEmulated) {
+            val serverUrl = preferencesManager.openSandboxServerUrl.value
+            val apiKey = preferencesManager.openSandboxApiKey.value
+            val findRes = client.executeCommand(serverUrl, apiKey, current.id, "find /workspace -type f -not -path '*/.*' -not -path '*/__pycache__*'", "/workspace")
+            findRes.onSuccess { exec ->
+                val lines = exec.stdout.lines().map { it.trim() }.filter { it.startsWith("/workspace/") }
+                for (p in lines) {
+                    val readRes = client.readFile(serverUrl, apiKey, current.id, p)
+                    readRes.onSuccess { content ->
+                        val target = resolver.resolve(p)
+                        target.parentFile?.mkdirs()
+                        if (!target.exists() || target.readText() != content) {
+                            target.writeText(content, Charsets.UTF_8)
+                            synced.add(target)
+                        }
+                    }
+                }
+            }
+        }
+
         synced
     }
 }
