@@ -1,0 +1,6 @@
+{
+  "name": "ARAGON",
+  "description": "Personal autonomous computer agent platform with persistent state, tool calling, and local execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

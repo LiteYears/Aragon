@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Aragon Autonomous Agent Crest (Centered in 66dp safe zone) -->
+    <!-- Outer Shield / Falcon Silhouette -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,26 L76,38 L76,58 C76,71.5 66.5,80.5 54,84 C41.5,80.5 32,71.5 32,58 L32,38 Z" />
+    <!-- Inner Obsidian Core Shield -->
+    <path
+        android:fillColor="#090D16"
+        android:pathData="M54,32 L70,41 L70,57 C70,67.5 62.5,74.5 54,78 C45.5,74.5 38,67.5 38,57 L38,41 Z" />
+    <!-- Terminal Command Prompt Chevron & Cursor / Falcon Wings -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M44,48 L50,54 L44,60 L47,63 L56,54 L47,45 Z" />
+    <!-- Agent Core Node (Golden Amber Accent) -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M58,59 H66 V63 H58 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,38 L57,43 L51,43 Z" />
+</vector>
