@@ -7,6 +7,7 @@ enum class LoopType {
     EXACT_REPETITION,
     SEMANTIC_REPETITION,
     NO_PROGRESS,
+    STAGNATION,
     FAILURE_LOOP,
     OSCILLATION
 }
@@ -15,15 +16,18 @@ data class LoopAnalysis(
     val isLooping: Boolean,
     val loopType: LoopType = LoopType.NONE,
     val reason: String = "",
-    val recommendedAction: String = "CONTINUE"
+    val recommendedAction: String = "CONTINUE",
+    val isCritical: Boolean = false,
+    val shouldTerminateBlocked: Boolean = false
 )
 
 class LoopDetector(
     private val maxRepeatedFailures: Int = 3,
-    private val maxSameActions: Int = 3,
-    private val maxNoProgressSteps: Int = 6
+    private val maxSameActions: Int = 2,
+    private val maxNoProgressSteps: Int = 4
 ) {
     private val history = mutableListOf<ActionRecord>()
+    private var consecutiveLoopDetections = 0
 
     data class ActionRecord(
         val toolName: String,
@@ -46,6 +50,23 @@ class LoopDetector(
         )
         history.add(record)
 
+        val analysis = evaluateLoop(toolName, sig, record)
+        if (analysis.isLooping) {
+            consecutiveLoopDetections++
+            val isCritical = consecutiveLoopDetections >= 2 || analysis.loopType == LoopType.EXACT_REPETITION
+            val shouldTerminate = consecutiveLoopDetections >= 2
+            return analysis.copy(
+                isCritical = isCritical,
+                shouldTerminateBlocked = shouldTerminate,
+                recommendedAction = if (shouldTerminate) "TERMINATE_BLOCKED" else analysis.recommendedAction
+            )
+        } else {
+            consecutiveLoopDetections = 0
+            return analysis
+        }
+    }
+
+    private fun evaluateLoop(toolName: String, sig: String, record: ActionRecord): LoopAnalysis {
         // 1. Exact Repetition Check (same tool and exact arguments repeated)
         val recentSame = history.takeLast(maxSameActions)
         if (recentSame.size >= maxSameActions && recentSame.all { it.argsSignature == sig }) {
@@ -57,7 +78,7 @@ class LoopDetector(
             )
         }
 
-        // 2. Failure Loop (consecutive failures on same tool)
+        // 2. Failure Loop (consecutive failures on same tool or commands)
         val recentFailures = history.takeLast(maxRepeatedFailures)
         if (recentFailures.size >= maxRepeatedFailures && recentFailures.all { !it.success }) {
             val tools = recentFailures.map { it.toolName }.distinct().joinToString(", ")
@@ -80,7 +101,7 @@ class LoopDetector(
                 return LoopAnalysis(
                     isLooping = true,
                     loopType = LoopType.OSCILLATION,
-                    reason = "Oscillation detected: alternating between two actions repeatedly.",
+                    reason = "Oscillation detected: alternating between two actions repeatedly without resolution.",
                     recommendedAction = "BREAK_OSCILLATION_AND_REPLAN"
                 )
             }
@@ -99,15 +120,16 @@ class LoopDetector(
             )
         }
 
-        // 5. No Progress Check (many actions with identical output and no files/artifacts produced)
+        // 5. Stagnation / No Progress Check (reading/inspecting files repeatedly without changes or progress)
         if (history.size >= maxNoProgressSteps) {
             val lastN = history.takeLast(maxNoProgressSteps)
-            if (lastN.all { it.toolName == "file_list" || it.toolName == "inspect_file" || it.toolName == "search_files" }) {
+            val readOnlyTools = setOf("file_list", "inspect_file", "search_files", "browser_session")
+            if (lastN.all { it.toolName in readOnlyTools }) {
                 return LoopAnalysis(
                     isLooping = true,
-                    loopType = LoopType.NO_PROGRESS,
-                    reason = "No progress: agent is reading/listing files repeatedly without executing changes.",
-                    recommendedAction = "FORCE_EXECUTION"
+                    loopType = LoopType.STAGNATION,
+                    reason = "Stagnation detected: agent executed $maxNoProgressSteps consecutive read-only operations without generating outputs or changing system state.",
+                    recommendedAction = "TERMINATE_BLOCKED"
                 )
             }
         }
@@ -121,5 +143,6 @@ class LoopDetector(
 
     fun reset() {
         history.clear()
+        consecutiveLoopDetections = 0
     }
 }

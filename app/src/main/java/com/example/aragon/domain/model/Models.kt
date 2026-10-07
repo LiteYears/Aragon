@@ -71,7 +71,11 @@ data class PlanStep(
     val verificationStatus: String? = null,
     val toolName: String? = null,
     val verified: Boolean = false,
-    val resultSummary: String? = null
+    val resultSummary: String? = null,
+    val phase: String = "",
+    val subtasks: List<String> = emptyList(),
+    val activeSubtaskIndex: Int = 0,
+    val nextIntent: String = ""
 )
 
 data class Task(
@@ -232,9 +236,13 @@ data class FailedApproach(
 
 enum class TimelineEventType {
     PLANNING,
-    REASONING,
+    TASK_STARTED,
+    ACTION,
     TOOL_EXECUTION,
     OBSERVATION,
+    REASONING,
+    DECISION,
+    RESULT,
     VERIFICATION,
     ARTIFACT_GENERATION,
     STATUS_CHANGE,
@@ -245,7 +253,11 @@ enum class TimelineEventType {
     WORKER_STARTED,
     WORKER_COMPLETED,
     REPLAN,
-    ERROR
+    RETRY,
+    WAITING,
+    ERROR,
+    TASK_COMPLETED,
+    GOAL_COMPLETED
 }
 
 data class TimelineEvent(

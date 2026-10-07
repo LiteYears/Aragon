@@ -130,7 +130,11 @@ data class PlanStepEntity(
     val attemptCount: Int = 0,
     val startedAt: Long? = null,
     val completedAt: Long? = null,
-    val verificationStatus: String? = null
+    val verificationStatus: String? = null,
+    val phase: String = "",
+    val subtasks: List<String> = emptyList(),
+    val activeSubtaskIndex: Int = 0,
+    val nextIntent: String = ""
 ) {
     fun toDomain(): PlanStep = PlanStep(
         id = id,
@@ -146,7 +150,11 @@ data class PlanStepEntity(
         verificationStatus = verificationStatus,
         toolName = toolName,
         verified = verified,
-        resultSummary = resultSummary
+        resultSummary = resultSummary,
+        phase = phase,
+        subtasks = subtasks,
+        activeSubtaskIndex = activeSubtaskIndex,
+        nextIntent = nextIntent
     )
 
     companion object {
@@ -164,7 +172,11 @@ data class PlanStepEntity(
             verificationStatus = step.verificationStatus,
             toolName = step.toolName,
             verified = step.verified,
-            resultSummary = step.resultSummary
+            resultSummary = step.resultSummary,
+            phase = step.phase,
+            subtasks = step.subtasks,
+            activeSubtaskIndex = step.activeSubtaskIndex,
+            nextIntent = step.nextIntent
         )
     }
 }

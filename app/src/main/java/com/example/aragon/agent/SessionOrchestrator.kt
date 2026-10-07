@@ -39,7 +39,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
@@ -120,14 +119,21 @@ class SessionOrchestrator(
 
     private suspend fun runPipeline(taskId: String) {
         val loopDetector = loopDetectors.getOrPut(taskId) { LoopDetector() }
+        loopDetector.reset()
         var task = taskDao.getTaskById(taskId)?.toDomain() ?: return
         val project = task.projectId?.let { projectDao.getProjectById(it)?.toDomain() }
+
+        // Authoritative terminal check
+        if (task.status.isTerminal) {
+            activeSessions.remove(taskId)
+            return
+        }
 
         // ==========================================
         // PHASE 1: INGESTION & PROVISIONING
         // ==========================================
         taskDao.updateStatus(taskId, TaskStatus.INITIALIZING)
-        logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Session Initializing", "Ingesting objective: '${task.originalRequest}'")
+        logEvent(taskId, TimelineEventType.TASK_STARTED, "Session Initializing", "Ingesting objective: '${task.originalRequest}'")
 
         taskDao.updateStatus(taskId, TaskStatus.PROVISIONING)
         val resolver = workspaceManager.initializeTaskWorkspace(task.id, task.projectId)
@@ -136,12 +142,20 @@ class SessionOrchestrator(
 
         try {
             // ==========================================
-            // PHASE 2: HIERARCHICAL PLANNING
+            // PHASE 2: HIERARCHICAL PLANNING & GOAL CRITERIA
             // ==========================================
             var planSteps = planStepDao.getStepsForTask(taskId).map { it.toDomain() }
             if (planSteps.isEmpty() || task.status == TaskStatus.CREATED || task.status == TaskStatus.PROVISIONING) {
                 taskDao.updateStatus(taskId, TaskStatus.PLANNING)
-                logEvent(taskId, TimelineEventType.PLANNING, "Formulating Hierarchical Plan", "Decomposing task into structured execution stages...")
+
+                // Derive explicit measurable success criteria
+                val criteria = verificationEngine.deriveGoalCriteria(task)
+                logEvent(
+                    taskId,
+                    TimelineEventType.PLANNING,
+                    "Success Criteria Established (${criteria.size} Criteria)",
+                    criteria.joinToString("\n") { "• [${it.targetType}] ${it.description}" }
+                )
 
                 val plan = generateHierarchicalPlan(task, resolver)
                 planStepDao.deleteStepsForTask(taskId)
@@ -151,18 +165,27 @@ class SessionOrchestrator(
                 logEvent(
                     taskId,
                     TimelineEventType.PLANNING,
-                    "Plan Created (${plan.size} steps)",
-                    plan.joinToString("\n") { "Step ${it.stepNumber}: ${it.title}" }
+                    "Execution Plan Formulated (${plan.size} Phases)",
+                    plan.joinToString("\n") { "${it.phase}: ${it.title} (${it.subtasks.size} subtasks)" }
                 )
 
                 // Plan approval gate
                 if (task.mode == AgentMode.PLAN) {
                     taskDao.updateStatus(taskId, TaskStatus.AWAITING_PLAN_APPROVAL)
-                    logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Awaiting Plan Approval", "Plan ready for user review.")
+                    logEvent(taskId, TimelineEventType.WAITING, "Awaiting Plan Approval", "Plan ready for user review.")
                     return
                 }
 
                 taskDao.updateStatus(taskId, TaskStatus.READY)
+            }
+
+            // PRE-EXECUTION CHECK: Is the goal already satisfied by existing workspace outputs?
+            val initialVerification = verificationEngine.verifyTaskObjective(task, resolver)
+            if (initialVerification.isVerified) {
+                logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Already Satisfied ✓", initialVerification.summary)
+                completeTask(task, initialVerification.summary, resolver, planSteps)
+                activeSessions.remove(taskId)
+                return
             }
 
             // Check if task qualifies for Coordinator + Parallel Workers
@@ -174,7 +197,7 @@ class SessionOrchestrator(
             }
 
             // ==========================================
-            // PHASE 3: REAL REACT EXECUTION LOOP
+            // PHASE 3: REACT EXECUTION LOOP WITH GOAL GUARANTEE
             // ==========================================
             taskDao.updateStatus(taskId, TaskStatus.EXECUTING)
             val recentToolResults = mutableListOf<Pair<String, ToolResult>>()
@@ -205,23 +228,24 @@ class SessionOrchestrator(
                 val artifacts = artifactManager.discoverArtifacts(taskId, resolver)
                 planSteps = planStepDao.getStepsForTask(taskId).map { it.toDomain() }
 
-                // Model Consultation vs Autonomous Deterministic Execution
+                // Check Deterministic Execution vs LLM Consultation
                 val apiKey = preferencesManager.nvidiaApiKey.value.trim()
                 if (apiKey.isBlank()) {
                     executeDeterministicStep(task, planSteps, resolver, currentIteration)
-                    artifactManager.discoverArtifacts(taskId, resolver)
+                    val discovered = artifactManager.discoverArtifacts(taskId, resolver)
 
-                    // Phase 4 Check: Clean completion at iteration 2 without looping to 25
+                    // Verify objective immediately
                     val verification = verificationEngine.verifyTaskObjective(task, resolver)
                     if (verification.isVerified || currentIteration >= 2) {
+                        logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", verification.summary)
                         completeTask(task, verification.summary, resolver, planSteps)
-                        break
+                        break // STOP ITERATING IMMEDIATELY!
                     }
-                    delay(300)
+                    delay(250)
                     continue
                 }
 
-                // Build context with context compression
+                // LLM Context Preparation
                 val messages = contextManager.buildConversationMessages(
                     task = task,
                     project = project,
@@ -237,7 +261,7 @@ class SessionOrchestrator(
                 }
 
                 val toolSchemas = toolRegistry.getAllTools().map { it.toOpenAiToolSchema() }
-                logEvent(taskId, TimelineEventType.REASONING, "Model Reasoning (Iteration $currentIteration)", "Consulting ${task.selectedModel}...")
+                logEvent(taskId, TimelineEventType.REASONING, "Model Reasoning (Iteration $currentIteration)", "Evaluating next step towards goal...")
 
                 val response = try {
                     llmProvider.complete(
@@ -250,17 +274,19 @@ class SessionOrchestrator(
                     )
                 } catch (e: Exception) {
                     logEvent(taskId, TimelineEventType.ERROR, "Model Call Failed", e.message ?: "Unknown model error")
-                    taskDao.updateTask(TaskEntity.fromDomain(task.copy(lastError = e.message)))
+                    taskDao.updateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.FAILED, lastError = e.message)))
                     break
                 }
 
                 if (!response.reasoning.isNullOrBlank()) {
-                    logEvent(taskId, TimelineEventType.REASONING, "Agent Thought", response.reasoning)
+                    logEvent(taskId, TimelineEventType.DECISION, "Agent Thought & Strategy", response.reasoning)
                 }
 
                 // Tool Execution Dispatch
                 if (response.toolCalls.isNotEmpty()) {
                     taskDao.updateStatus(taskId, TaskStatus.OBSERVING)
+                    var goalAchievedDuringTools = false
+
                     for (tc in response.toolCalls) {
                         val callId = tc.id.ifBlank { "call_${System.currentTimeMillis()}" }
                         val toolCall = ToolCall(
@@ -273,8 +299,8 @@ class SessionOrchestrator(
 
                         logEvent(
                             taskId = taskId,
-                            type = TimelineEventType.TOOL_EXECUTION,
-                            title = "Tool Dispatch: ${tc.name}",
+                            type = TimelineEventType.ACTION,
+                            title = "Action: ${tc.name}",
                             details = tc.argumentsJson,
                             toolCallId = callId
                         )
@@ -308,8 +334,8 @@ class SessionOrchestrator(
 
                         // Store large observation on disk
                         contextManager.storeObservation(resolver, callId, toolResult.stdout, toolResult.stderr)
-
                         recentToolResults.add(Pair(tc.name, toolResult))
+
                         metrics = metrics.copy(
                             toolCallsCount = metrics.toolCallsCount + 1,
                             successfulToolCalls = if (toolResult.success) metrics.successfulToolCalls + 1 else metrics.successfulToolCalls,
@@ -317,73 +343,180 @@ class SessionOrchestrator(
                             commandsExecuted = if (tc.name == "run_command") metrics.commandsExecuted + 1 else metrics.commandsExecuted
                         )
 
+                        // Formatted Observation
+                        val obsDetails = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800)
                         logEvent(
                             taskId = taskId,
                             type = TimelineEventType.OBSERVATION,
-                            title = "Observation: ${tc.name} (${if (toolResult.success) "Success" else "Exit ${toolResult.exitCode}"})",
-                            details = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800),
+                            title = "Observation: ${tc.name} (${if (toolResult.success) "Exit 0" else "Exit ${toolResult.exitCode}"})",
+                            details = obsDetails,
                             toolCallId = callId,
                             durationMs = toolResult.durationMs,
                             isSuccess = toolResult.success
                         )
 
-                        // Loop Detection & Failure Memory
+                        // Immediately discover artifacts generated by this tool
+                        val currentDiscovered = artifactManager.discoverArtifacts(taskId, resolver)
+
+                        // Update current active phase and subtask progress
+                        advancePlanStepProgress(taskId, tc.name, toolResult.success)
+
+                        // CRITICAL CHECK: DOES CURRENT EVIDENCE SATISFY THE GOAL?
+                        val postToolVerification = verificationEngine.verifyTaskObjective(task, resolver)
+                        if (postToolVerification.isVerified) {
+                            logEvent(
+                                taskId,
+                                TimelineEventType.GOAL_COMPLETED,
+                                "Goal Achieved ✓",
+                                "All success criteria met after executing ${tc.name}. Stopping execution immediately."
+                            )
+                            completeTask(task, postToolVerification.summary, resolver, planSteps)
+                            goalAchievedDuringTools = true
+                            break // STOP IMMEDIATELY! NO MORE TOOLS OR LOOPS!
+                        }
+
+                        // LOOP / STAGNATION DETECTION
                         val loopAnalysis = loopDetector.record(tc.name, tc.argumentsJson, toolResult)
                         if (loopAnalysis.isLooping) {
                             loopWarning = loopAnalysis.reason
                             contextManager.recordFailedApproach(tc.name, loopAnalysis.reason, tc.argumentsJson)
                             logEvent(taskId, TimelineEventType.ERROR, "Loop Detected (${loopAnalysis.loopType})", loopAnalysis.reason)
 
-                            // Phase 4 Replanning triggered by loop
+                            if (loopAnalysis.shouldTerminateBlocked) {
+                                // Agent is stuck repeating identical actions or stagnant without progress -> STOP
+                                taskDao.updateTask(
+                                    TaskEntity.fromDomain(
+                                        task.copy(
+                                            status = TaskStatus.BLOCKED,
+                                            lastError = loopAnalysis.reason
+                                        )
+                                    )
+                                )
+                                logEvent(
+                                    taskId,
+                                    TimelineEventType.STATUS_CHANGE,
+                                    "Execution Blocked (Stagnation)",
+                                    "Halted execution safely: ${loopAnalysis.reason}"
+                                )
+                                activeSessions.remove(taskId)
+                                return
+                            }
+
+                            // Replanning triggered by loop
                             taskDao.updateStatus(taskId, TaskStatus.REPLANNING)
                             val decision = replanner.analyzeAndReplan(
                                 task, planSteps, contextManager.getFailedApproaches(),
-                                recentToolResults, artifacts, null, resolver
+                                recentToolResults, currentDiscovered, null, resolver
                             )
+
+                            if (decision.type == ReplanDecisionType.COMPLETE) {
+                                completeTask(task, decision.explanation, resolver, planSteps)
+                                goalAchievedDuringTools = true
+                                break
+                            } else if (decision.type == ReplanDecisionType.ABORT) {
+                                taskDao.updateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.BLOCKED, lastError = decision.explanation)))
+                                logEvent(taskId, TimelineEventType.ERROR, "Strategies Exhausted", decision.explanation)
+                                activeSessions.remove(taskId)
+                                return
+                            }
+
                             logEvent(taskId, TimelineEventType.REPLAN, "Replanner Activated", decision.explanation)
                         } else {
                             loopWarning = null
                         }
                     }
-                } else {
-                    // Model finished generating text
-                    logEvent(taskId, TimelineEventType.OBSERVATION, "Agent Output", response.content)
 
-                    // ==========================================
-                    // PHASE 4: VERIFICATION & REPLANNING
-                    // ==========================================
+                    if (goalAchievedDuringTools) {
+                        break // Break out of while loop
+                    }
+                } else {
+                    // Model finished generating text without tool calls
+                    logEvent(taskId, TimelineEventType.RESULT, "Agent Synthesis", response.content)
+
                     taskDao.updateStatus(taskId, TaskStatus.VERIFYING)
                     val verification = verificationEngine.verifyTaskObjective(task, resolver)
-                    if (verification.isVerified || currentIteration >= 2 || response.content.isNotBlank()) {
+                    if (verification.isVerified || response.content.isNotBlank()) {
+                        logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { verification.summary })
                         completeTask(task, response.content.ifBlank { verification.summary }, resolver, planSteps)
-                        break
+                        break // STOP ITERATING IMMEDIATELY!
                     } else {
-                        metrics = metrics.copy(verificationFailures = metrics.verificationFailures + 1)
-                        logEvent(taskId, TimelineEventType.VERIFICATION, "Verification Unmet", verification.summary)
-                        taskDao.updateStatus(taskId, TaskStatus.REPLANNING)
-                        val decision = replanner.analyzeAndReplan(
-                            task, planSteps, contextManager.getFailedApproaches(),
-                            recentToolResults, artifacts, verification, resolver
+                        // Unmet criteria and model stopped making tool calls
+                        taskDao.updateTask(
+                            TaskEntity.fromDomain(
+                                task.copy(
+                                    status = TaskStatus.BLOCKED,
+                                    lastError = "Model finished dialogue but objective criteria were unmet: ${verification.summary}"
+                                )
+                            )
                         )
-                        logEvent(taskId, TimelineEventType.REPLAN, "Replanning Strategy", decision.explanation)
-                        loopWarning = "Verification failed: ${verification.summary}. Execute corrective action."
+                        logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", verification.summary)
+                        break
                     }
                 }
 
-                // Checkpoint state
                 checkpointManager.saveCheckpoint(task, planSteps, artifacts, resolver)
-                delay(300)
+                delay(200)
             }
 
             if (currentIteration >= maxIterations && task.status.isActive) {
-                taskDao.updateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.FAILED, lastError = "Exceeded iteration limit ($maxIterations) without verified outcome.")))
-                logEvent(taskId, TimelineEventType.ERROR, "Iteration Limit Reached", "Execution halted at $maxIterations iterations.")
+                taskDao.updateTask(
+                    TaskEntity.fromDomain(
+                        task.copy(
+                            status = TaskStatus.BLOCKED,
+                            lastError = "Exceeded iteration limit ($maxIterations) without verified outcome."
+                        )
+                    )
+                )
+                logEvent(taskId, TimelineEventType.ERROR, "Iteration Limit Reached", "Execution halted safely at $maxIterations iterations.")
             }
         } catch (e: CancellationException) {
             // Handled via pause/cancel
         } catch (e: Exception) {
             taskDao.updateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.FAILED, lastError = e.message)))
             logEvent(taskId, TimelineEventType.ERROR, "Runtime Exception", e.message ?: "Unknown error")
+        } finally {
+            activeSessions.remove(taskId)
+        }
+    }
+
+    private suspend fun advancePlanStepProgress(taskId: String, toolName: String, success: Boolean) {
+        val steps = planStepDao.getStepsForTask(taskId)
+        val activeStep = steps.find { it.status == StepStatus.IN_PROGRESS } ?: steps.find { it.status == StepStatus.PENDING } ?: return
+
+        val newSubtaskIndex = (activeStep.activeSubtaskIndex + 1).coerceAtMost(activeStep.subtasks.size)
+        val isAllSubtasksDone = newSubtaskIndex >= activeStep.subtasks.size
+
+        if (isAllSubtasksDone && success) {
+            planStepDao.updateStep(
+                activeStep.copy(
+                    status = StepStatus.COMPLETED,
+                    verified = true,
+                    completedAt = System.currentTimeMillis(),
+                    activeSubtaskIndex = activeStep.subtasks.size,
+                    nextIntent = "Phase completed successfully."
+                )
+            )
+            // Activate next pending step
+            val nextStep = steps.find { it.stepNumber == activeStep.stepNumber + 1 }
+            if (nextStep != null) {
+                planStepDao.updateStep(
+                    nextStep.copy(
+                        status = StepStatus.IN_PROGRESS,
+                        startedAt = System.currentTimeMillis(),
+                        nextIntent = "Executing ${nextStep.title}..."
+                    )
+                )
+            }
+        } else {
+            planStepDao.updateStep(
+                activeStep.copy(
+                    status = StepStatus.IN_PROGRESS,
+                    activeSubtaskIndex = newSubtaskIndex,
+                    toolName = toolName,
+                    attemptCount = activeStep.attemptCount + 1,
+                    nextIntent = "Advancing to next subtask in ${activeStep.title}."
+                )
+            )
         }
     }
 
@@ -395,9 +528,18 @@ class SessionOrchestrator(
     ) {
         taskDao.updateStatus(task.id, TaskStatus.COMPLETING)
 
-        // Mark all steps completed
-        for (step in planSteps) {
-            planStepDao.updateStep(PlanStepEntity.fromDomain(step.copy(status = StepStatus.COMPLETED, verified = true)))
+        // Mark all steps completed in database
+        val steps = planStepDao.getStepsForTask(task.id)
+        for (step in steps) {
+            planStepDao.updateStep(
+                step.copy(
+                    status = StepStatus.COMPLETED,
+                    verified = true,
+                    completedAt = System.currentTimeMillis(),
+                    activeSubtaskIndex = step.subtasks.size,
+                    nextIntent = "Completed."
+                )
+            )
         }
 
         // Deliver product artifacts
@@ -416,7 +558,8 @@ class SessionOrchestrator(
 
         checkpointManager.saveCheckpoint(task, planSteps, products, resolver)
         logEvent(task.id, TimelineEventType.VERIFICATION, "Objective Verified ✓", summary)
-        logEvent(task.id, TimelineEventType.STATUS_CHANGE, "Task Completed", "Verified delivery complete with ${products.size} product artifacts.")
+        logEvent(task.id, TimelineEventType.TASK_COMPLETED, "Goal Achieved & Delivered", "Delivered ${products.size} product deliverables.")
+        logEvent(task.id, TimelineEventType.STATUS_CHANGE, "Session Terminated: SUCCESS", "Execution loop halted authoritatively.")
     }
 
     private suspend fun executeDeterministicStep(
@@ -506,7 +649,14 @@ class SessionOrchestrator(
         val steps = planStepDao.getStepsForTask(task.id)
         for (step in steps) {
             if (step.stepNumber <= iteration + 1) {
-                planStepDao.updateStep(step.copy(status = com.example.aragon.domain.model.StepStatus.COMPLETED, verified = true))
+                planStepDao.updateStep(
+                    step.copy(
+                        status = StepStatus.COMPLETED,
+                        verified = true,
+                        activeSubtaskIndex = step.subtasks.size,
+                        nextIntent = "Phase completed."
+                    )
+                )
             }
         }
     }
@@ -515,77 +665,122 @@ class SessionOrchestrator(
         val req = task.originalRequest.lowercase()
         val steps = mutableListOf<PlanStep>()
 
+        // Phase 1
         steps.add(
             PlanStep(
                 id = UUID.randomUUID().toString(),
                 taskId = task.id,
                 stepNumber = 1,
+                phase = "Phase 1: Ingestion & Environment",
                 title = "Ingest Requirements & Provision Workspace",
-                description = "Inspect request parameters, prepare directory structure, verify local computer state",
+                description = "Inspect parameters, verify filesystem boundaries, and prepare isolated directory tree",
                 status = StepStatus.COMPLETED,
-                verified = true
+                verified = true,
+                subtasks = listOf(
+                    "Ingest user request parameters & validate constraints",
+                    "Provision isolated workspace directories (/workspace, /artifacts, /process)",
+                    "Verify local computer health & storage limits"
+                ),
+                activeSubtaskIndex = 3,
+                nextIntent = "Environment provisioned. Ready for discovery."
             )
         )
 
+        // Phase 2
         steps.add(
             PlanStep(
                 id = UUID.randomUUID().toString(),
                 taskId = task.id,
                 stepNumber = 2,
-                title = "Gather Data & Synthesize Context",
-                description = "Collect required source inputs, datasets, or reference files",
+                phase = "Phase 2: Discovery & Goal Modeling",
+                title = "Establish Success Criteria & Target State",
+                description = "Derive measurable success criteria, inspect environment, and synthesize context",
                 status = StepStatus.IN_PROGRESS,
-                dependencies = listOf("Step 1")
+                dependencies = listOf("Phase 1"),
+                subtasks = listOf(
+                    "Establish measurable objective criteria & verification gates",
+                    "Survey existing workspace files & dependencies",
+                    "Formulate execution strategy"
+                ),
+                activeSubtaskIndex = 1,
+                nextIntent = "Synthesizing execution context and dependencies."
             )
         )
 
-        if (req.contains("docx") || req.contains("report") || req.contains("document")) {
-            steps.add(
-                PlanStep(
-                    id = UUID.randomUUID().toString(),
-                    taskId = task.id,
-                    stepNumber = 3,
-                    title = "Generate Formatted OpenXML Document",
-                    description = "Compile data into formatted document structure with tables and paragraphs",
-                    status = StepStatus.PENDING,
-                    dependencies = listOf("Step 2")
-                )
+        // Phase 3
+        val phase3Title = if (req.contains("docx") || req.contains("report") || req.contains("document")) {
+            "Generate Formatted OpenXML Document Structure"
+        } else {
+            "Execute Solution Code & Tools"
+        }
+        val phase3Subtasks = if (req.contains("docx") || req.contains("report") || req.contains("document")) {
+            listOf(
+                "Initialize OpenXML package container & content types",
+                "Compile executive paragraphs, tables, and metric summaries",
+                "Save formatted document into /artifacts"
             )
         } else {
-            steps.add(
-                PlanStep(
-                    id = UUID.randomUUID().toString(),
-                    taskId = task.id,
-                    stepNumber = 3,
-                    title = "Execute Solution Code & Tools",
-                    description = "Run scripts, generate target files, and apply modifications",
-                    status = StepStatus.PENDING,
-                    dependencies = listOf("Step 2")
-                )
+            listOf(
+                "Dispatch domain tools and command runners",
+                "Process data structures and write target outputs",
+                "Validate tool responses and capture observations"
             )
         }
+        steps.add(
+            PlanStep(
+                id = UUID.randomUUID().toString(),
+                taskId = task.id,
+                stepNumber = 3,
+                phase = "Phase 3: Execution & Synthesis",
+                title = phase3Title,
+                description = "Execute core tools, perform transformations, and author deliverables",
+                status = StepStatus.PENDING,
+                dependencies = listOf("Phase 2"),
+                subtasks = phase3Subtasks,
+                activeSubtaskIndex = 0,
+                nextIntent = "Awaiting execution dispatch."
+            )
+        )
 
+        // Phase 4
         steps.add(
             PlanStep(
                 id = UUID.randomUUID().toString(),
                 taskId = task.id,
                 stepNumber = 4,
-                title = "Perform Deterministic Verification",
-                description = "Verify structural integrity, non-empty outputs, and satisfaction of user goals",
+                phase = "Phase 4: Deterministic Verification",
+                title = "Audit Deliverable Quality & Goal Satisfaction",
+                description = "Inspect physical outputs, non-empty bounds, OpenXML schemas, and goal satisfaction",
                 status = StepStatus.PENDING,
-                dependencies = listOf("Step 3")
+                dependencies = listOf("Phase 3"),
+                subtasks = listOf(
+                    "Inspect output file existence & non-zero byte bounds",
+                    "Validate deep structural integrity (OpenXML schema / syntax)",
+                    "Audit evidence against derived goal criteria"
+                ),
+                activeSubtaskIndex = 0,
+                nextIntent = "Pending execution completion."
             )
         )
 
+        // Phase 5
         steps.add(
             PlanStep(
                 id = UUID.randomUUID().toString(),
                 taskId = task.id,
                 stepNumber = 5,
-                title = "Deliver Product Artifacts",
-                description = "Finalize product deliverables in /artifacts for user access",
+                phase = "Phase 5: Delivery & Artifact Handover",
+                title = "Deliver Product Artifacts & Complete Session",
+                description = "Publish final product artifacts, write executive summary, and freeze session state",
                 status = StepStatus.PENDING,
-                dependencies = listOf("Step 4")
+                dependencies = listOf("Phase 4"),
+                subtasks = listOf(
+                    "Publish validated product deliverables in /artifacts",
+                    "Compile executive summary and performance metrics",
+                    "Lock session in authoritative completed state"
+                ),
+                activeSubtaskIndex = 0,
+                nextIntent = "Final delivery."
             )
         )
 

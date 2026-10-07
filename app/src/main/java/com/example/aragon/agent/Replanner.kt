@@ -7,7 +7,6 @@ import com.example.aragon.domain.model.PlanStep
 import com.example.aragon.domain.model.StepStatus
 import com.example.aragon.domain.model.Task
 import com.example.aragon.domain.model.ToolResult
-import java.util.UUID
 
 enum class ReplanDecisionType {
     CONTINUE_CURRENT_STEP,
@@ -24,7 +23,8 @@ data class ReplanDecision(
     val explanation: String,
     val suggestedTool: String? = null,
     val suggestedParameters: String? = null,
-    val updatedSteps: List<PlanStep>? = null
+    val updatedSteps: List<PlanStep>? = null,
+    val suggestedIntent: String? = null
 )
 
 class Replanner {
@@ -38,11 +38,12 @@ class Replanner {
         verificationResult: VerificationResult?,
         resolver: WorkspacePathResolver
     ): ReplanDecision {
-        // 1. If verification already passed, complete
+        // 1. If verification already passed, complete immediately
         if (verificationResult?.isVerified == true) {
             return ReplanDecision(
                 type = ReplanDecisionType.COMPLETE,
-                explanation = "Verification succeeded: All required criteria and artifacts are satisfied."
+                explanation = "Verification succeeded: All required criteria and deliverables are satisfied.",
+                suggestedIntent = "Deliver product artifacts and finalize session."
             )
         }
 
@@ -55,12 +56,12 @@ class Replanner {
             val err = result.stderr.lowercase()
 
             if (err.contains("no module named") || err.contains("modulenotfounderror") || err.contains("nameerror")) {
-                // Diagnose python environment issue -> change strategy to built-in generator or fallback
                 return ReplanDecision(
                     type = ReplanDecisionType.CHANGE_STRATEGY,
                     explanation = "Python environment is missing an external dependency. Switching strategy to built-in OpenXML document generator or standard library script.",
                     suggestedTool = "python_execute",
-                    suggestedParameters = """{"code": "# Standard library fallback\n"}"""
+                    suggestedParameters = """{"code": "# Standard library fallback\n"}""",
+                    suggestedIntent = "Switch to built-in generator or standard library without external dependencies."
                 )
             }
 
@@ -69,7 +70,8 @@ class Replanner {
                     type = ReplanDecisionType.REPAIR_CURRENT_STEP,
                     explanation = "Permission denied on file or directory. Repairing file permissions or executing in /workspace.",
                     suggestedTool = "run_command",
-                    suggestedParameters = """{"command": "chmod +x ${result.workingDirectory}"}"""
+                    suggestedParameters = """{"command": "chmod +x ${result.workingDirectory}"}""",
+                    suggestedIntent = "Apply execution permissions and retry."
                 )
             }
 
@@ -77,23 +79,26 @@ class Replanner {
                 return ReplanDecision(
                     type = ReplanDecisionType.CHANGE_STRATEGY,
                     explanation = "Previous operation timed out. Splitting into smaller incremental operations.",
-                    suggestedTool = "run_command"
+                    suggestedTool = "run_command",
+                    suggestedIntent = "Split long operation into incremental steps."
                 )
             }
         }
 
-        // 3. Check if too many approaches failed (e.g. 5+ failures)
-        if (failedApproaches.size >= 5) {
+        // 3. Check if too many approaches failed (e.g. 4+ failures) -> halt instead of looping forever
+        if (failedApproaches.size >= 4) {
             return ReplanDecision(
-                type = ReplanDecisionType.REQUEST_USER_INPUT,
-                explanation = "Multiple strategies failed (${failedApproaches.size} attempts). Requesting guidance or additional environment permissions."
+                type = ReplanDecisionType.ABORT,
+                explanation = "Exhausted viable strategies (${failedApproaches.size} attempts failed). Halting execution to prevent destructive loop.",
+                suggestedIntent = "Execution blocked due to repeated strategy failure."
             )
         }
 
-        // 4. Default: repair active step and continue
+        // 4. Default: repair active step and continue with explicit intent
         return ReplanDecision(
             type = ReplanDecisionType.REPAIR_CURRENT_STEP,
-            explanation = "Adjusting arguments and repairing current step (${activeStep?.title ?: "execution"})."
+            explanation = "Adjusting parameters and repairing current step (${activeStep?.title ?: "execution"}).",
+            suggestedIntent = "Retry step with adjusted parameters."
         )
     }
 }
