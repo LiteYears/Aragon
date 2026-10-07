@@ -12,11 +12,24 @@ class PreferencesManager(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences("aragon_secure_prefs", Context.MODE_PRIVATE)
 
-    private val _nvidiaApiKey = MutableStateFlow(prefs.getString(KEY_API_KEY, "") ?: "")
+    private val _nvidiaApiKey = MutableStateFlow(
+        prefs.getString(KEY_API_KEY, "").orEmpty().ifBlank {
+            com.example.BuildConfig.NVIDIA_API_KEY.takeIf {
+                it.isNotBlank() && !it.startsWith("YOUR_") && !it.startsWith("your_")
+            }.orEmpty()
+        }
+    )
     val nvidiaApiKey: StateFlow<String> = _nvidiaApiKey.asStateFlow()
 
+    private val _endpoint = MutableStateFlow(
+        prefs.getString(KEY_ENDPOINT, DEFAULT_ENDPOINT)?.takeIf { it.isNotBlank() } ?: DEFAULT_ENDPOINT
+    )
+    val endpoint: StateFlow<String> = _endpoint.asStateFlow()
+
     private val _selectedModel = MutableStateFlow(
-        prefs.getString(KEY_SELECTED_MODEL, "meta/llama-3.3-70b-instruct") ?: "meta/llama-3.3-70b-instruct"
+        prefs.getString(KEY_SELECTED_MODEL, "meta/llama-3.2-11b-vision-instruct")
+            ?.takeIf { it.isNotBlank() && it != "meta/llama-3.3-70b-instruct" }
+            ?: "meta/llama-3.2-11b-vision-instruct"
     )
     val selectedModel: StateFlow<String> = _selectedModel.asStateFlow()
 
@@ -42,6 +55,13 @@ class PreferencesManager(context: Context) {
         val trimmed = key.trim()
         prefs.edit().putString(KEY_API_KEY, trimmed).apply()
         _nvidiaApiKey.value = trimmed
+    }
+
+    fun setEndpoint(url: String) {
+        val cleanUrl = url.trim().removeSuffix("/")
+        val finalUrl = if (cleanUrl.isBlank()) DEFAULT_ENDPOINT else cleanUrl
+        prefs.edit().putString(KEY_ENDPOINT, finalUrl).apply()
+        _endpoint.value = finalUrl
     }
 
     fun setSelectedModel(modelId: String) {
@@ -70,6 +90,8 @@ class PreferencesManager(context: Context) {
     }
 
     companion object {
+        const val DEFAULT_ENDPOINT = "https://integrate.api.nvidia.com/v1"
+        private const val KEY_ENDPOINT = "api_endpoint"
         private const val KEY_API_KEY = "nvidia_nim_api_key"
         private const val KEY_SELECTED_MODEL = "selected_model"
         private const val KEY_DEFAULT_MODE = "default_mode"

@@ -64,11 +64,15 @@ class MainViewModel : ViewModel() {
         if (id == null) flowOf(emptyList()) else artifactRepo.getArtifactsForTask(id)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val pendingApprovals: StateFlow<List<com.example.aragon.domain.model.ApprovalRequest>> =
+        agentHarness.approvalManager.pendingRequests
+
     private val _models = MutableStateFlow(modelRegistry.getAllModels())
     val models: StateFlow<List<ModelInfo>> = _models.asStateFlow()
 
     val selectedModel: StateFlow<String> = preferences.selectedModel
     val apiKey: StateFlow<String> = preferences.nvidiaApiKey
+    val endpoint: StateFlow<String> = preferences.endpoint
     val autonomyLevel: StateFlow<AutonomyLevel> = preferences.autonomyLevel
     val maxIterations: StateFlow<Int> = preferences.maxIterations
     val temperature: StateFlow<Float> = preferences.temperature
@@ -131,6 +135,10 @@ class MainViewModel : ViewModel() {
         agentHarness.cancelTask(taskId)
     }
 
+    fun respondToApproval(requestId: String, approved: Boolean) {
+        agentHarness.respondToApproval(requestId, approved)
+    }
+
     fun deleteTask(taskId: String) {
         viewModelScope.launch {
             taskRepo.deleteTask(taskId)
@@ -149,6 +157,19 @@ class MainViewModel : ViewModel() {
     fun saveApiKey(key: String) {
         preferences.setNvidiaApiKey(key)
         refreshModels()
+    }
+
+    fun saveEndpoint(url: String) {
+        preferences.setEndpoint(url)
+        refreshModels()
+    }
+
+    suspend fun testConnection(apiKey: String? = null, endpointUrl: String? = null): Result<String> {
+        val res = nimProvider.testConnection(apiKey, endpointUrl)
+        if (res.isSuccess) {
+            refreshModels()
+        }
+        return res
     }
 
     fun selectModel(modelId: String) {

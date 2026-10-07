@@ -19,7 +19,10 @@ class ToolExecutor(
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    private val textEditorTool: TextEditorTool = TextEditorTool(),
+    private val browserSession: com.example.aragon.computer.BrowserSession = com.example.aragon.computer.BrowserSession(okHttpClient),
+    private val verificationEngine: com.example.aragon.agent.VerificationEngine = com.example.aragon.agent.VerificationEngine()
 ) {
 
     suspend fun executeTool(
@@ -36,6 +39,9 @@ class ToolExecutor(
             when (toolName) {
                 "run_command" -> executeRunCommand(callId, taskId, args, resolver, startTime)
                 "python_execute" -> executePython(callId, taskId, args, resolver, startTime)
+                "text_editor" -> executeTextEditor(callId, taskId, args, resolver)
+                "browser_action" -> executeBrowserAction(callId, taskId, args, resolver, startTime)
+                "verify_objective" -> executeVerifyObjective(callId, taskId, args, resolver, startTime)
                 "file_list" -> executeFileList(callId, taskId, args, resolver, startTime)
                 "file_read" -> executeFileRead(callId, taskId, args, resolver, startTime)
                 "file_write" -> executeFileWrite(callId, taskId, args, resolver, startTime)
@@ -161,19 +167,21 @@ class ToolExecutor(
         val command = "python3 ${resolver.toLogicalPath(scriptFile)} $extraArgs".trim()
         val result = processManager.execute(command, resolver.workspaceDir, timeoutMs)
 
-        // If python3 command failed with 127 (not found), execute Python helper or script logic
-        if (result.exitCode == 127) {
+        // If python3 command failed (e.g. not found, path resolution, or DSL runtime error), execute Python fallback engine
+        if (result.exitCode != 0) {
             val fallbackResult = executePythonFallback(code, resolver, scriptFile)
-            return ToolResult(
-                callId = callId,
-                taskId = taskId,
-                success = fallbackResult.success,
-                exitCode = fallbackResult.exitCode,
-                stdout = fallbackResult.stdout,
-                stderr = fallbackResult.stderr,
-                durationMs = System.currentTimeMillis() - startTime,
-                workingDirectory = "/workspace"
-            )
+            if (fallbackResult.success) {
+                return ToolResult(
+                    callId = callId,
+                    taskId = taskId,
+                    success = fallbackResult.success,
+                    exitCode = fallbackResult.exitCode,
+                    stdout = fallbackResult.stdout,
+                    stderr = fallbackResult.stderr,
+                    durationMs = System.currentTimeMillis() - startTime,
+                    workingDirectory = "/workspace"
+                )
+            }
         }
 
         return ToolResult(
@@ -783,6 +791,100 @@ class ToolExecutor(
             exitCode = if (report.isValid) 0 else 1,
             stdout = details.trimEnd(),
             stderr = if (!report.isValid) report.details else "",
+            durationMs = System.currentTimeMillis() - startTime,
+            workingDirectory = "/workspace"
+        )
+    }
+
+    private fun executeTextEditor(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver
+    ): ToolResult {
+        val op = args.optString("operation", "view")
+        val path = args.optString("path", "")
+        val content = if (args.has("content")) args.optString("content") else null
+        val targetContent = if (args.has("targetContent")) args.optString("targetContent") else null
+        val replacementContent = if (args.has("replacementContent")) args.optString("replacementContent") else null
+        val startLine = if (args.has("startLine")) args.optInt("startLine") else null
+        val lineCount = if (args.has("lineCount")) args.optInt("lineCount") else null
+
+        return textEditorTool.execute(
+            callId = callId,
+            taskId = taskId,
+            operation = op,
+            path = path,
+            content = content,
+            targetContent = targetContent,
+            replacementContent = replacementContent,
+            startLine = startLine,
+            lineCount = lineCount,
+            resolver = resolver
+        )
+    }
+
+    private suspend fun executeBrowserAction(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver,
+        startTime: Long
+    ): ToolResult {
+        val action = args.optString("action", "navigate").lowercase()
+        val url = args.optString("url", "")
+        val selector = args.optString("selector", "")
+        val text = args.optString("text", "")
+        val direction = args.optString("direction", "down")
+
+        val output = when (action) {
+            "navigate" -> browserSession.navigate(url).first
+            "click" -> browserSession.click(selector)
+            "input" -> browserSession.input(selector, text)
+            "scroll" -> browserSession.scroll(direction)
+            "extract" -> browserSession.extract()
+            "screenshot" -> {
+                val shotFile = File(resolver.artifactsDir, "screenshot_${System.currentTimeMillis()}.png")
+                browserSession.screenshot(shotFile)
+                "Screenshot captured at ${resolver.toLogicalPath(shotFile)}"
+            }
+            else -> "Unsupported browser action: $action"
+        }
+
+        return ToolResult(
+            callId = callId,
+            taskId = taskId,
+            success = true,
+            exitCode = 0,
+            stdout = output,
+            stderr = "",
+            durationMs = System.currentTimeMillis() - startTime,
+            workingDirectory = "/workspace"
+        )
+    }
+
+    private fun executeVerifyObjective(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver,
+        startTime: Long
+    ): ToolResult {
+        val objective = args.optString("objective", "")
+        val dummyTask = com.example.aragon.domain.model.Task(
+            id = taskId,
+            title = "Verification",
+            originalRequest = objective
+        )
+        val result = verificationEngine.verifyTaskObjective(dummyTask, resolver)
+
+        return ToolResult(
+            callId = callId,
+            taskId = taskId,
+            success = result.isVerified,
+            exitCode = if (result.isVerified) 0 else 1,
+            stdout = result.summary,
+            stderr = if (!result.isVerified) result.summary else "",
             durationMs = System.currentTimeMillis() - startTime,
             workingDirectory = "/workspace"
         )

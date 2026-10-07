@@ -46,7 +46,9 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -56,6 +58,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.aragon.data.preferences.PreferencesManager
 import com.example.aragon.domain.model.AutonomyLevel
 import com.example.ui.theme.AragonObsidianBg
 import com.example.ui.theme.AragonSuccess
@@ -65,12 +68,14 @@ import com.example.ui.theme.AragonSurfaceVariant
 @Composable
 fun SettingsScreen(
     currentApiKey: String,
+    currentEndpoint: String,
     selectedModel: String,
     autonomyLevel: AutonomyLevel,
     maxIterations: Int,
     temperature: Float,
     onSaveApiKey: (String) -> Unit,
-    onTestConnection: (suspend () -> Result<String>) -> Unit,
+    onSaveEndpoint: (String) -> Unit,
+    onTestConnection: suspend (apiKey: String, endpoint: String) -> Result<String>,
     onSelectModelClick: () -> Unit,
     onSaveAutonomyLevel: (AutonomyLevel) -> Unit,
     onSaveMaxIterations: (Int) -> Unit,
@@ -79,13 +84,16 @@ fun SettingsScreen(
     onRunHealthCheck: () -> Unit
 ) {
     var apiKeyInput by remember(currentApiKey) { mutableStateOf(currentApiKey) }
+    var endpointInput by remember(currentEndpoint) { mutableStateOf(currentEndpoint) }
     var showPassword by remember { mutableStateOf(false) }
     var connectionStatus by remember { mutableStateOf<String?>(null) }
+    var isConnectionError by remember { mutableStateOf(false) }
     var isTestingConnection by remember { mutableStateOf(false) }
     var currentAutonomy by remember(autonomyLevel) { mutableStateOf(autonomyLevel) }
     var currentIterations by remember(maxIterations) { mutableIntStateOf(maxIterations) }
     var currentTemp by remember(temperature) { mutableFloatStateOf(temperature) }
 
+    val coroutineScope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
 
     Column(
@@ -127,14 +135,26 @@ fun SettingsScreen(
                         fontWeight = FontWeight.Bold
                     )
                 }
-                Text(
-                    text = "Endpoint: https://integrate.api.nvidia.com/v1",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Endpoint Field
+                OutlinedTextField(
+                    value = endpointInput,
+                    onValueChange = { endpointInput = it },
+                    label = { Text("NVIDIA NIM Endpoint URL") },
+                    placeholder = { Text("https://integrate.api.nvidia.com/v1") },
+                    singleLine = true,
+                    trailingIcon = {
+                        TextButton(onClick = { endpointInput = PreferencesManager.DEFAULT_ENDPOINT }) {
+                            Text("Reset", style = MaterialTheme.typography.labelSmall)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("api_endpoint_input")
                 )
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // API Key Field
                 OutlinedTextField(
@@ -156,35 +176,50 @@ fun SettingsScreen(
                         .testTag("api_key_input")
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 Row(modifier = Modifier.fillMaxWidth()) {
                     Button(
                         onClick = {
-                            onSaveApiKey(apiKeyInput.trim())
-                            connectionStatus = "Key saved locally."
+                            val trimmedKey = apiKeyInput.trim()
+                            val trimmedEndpoint = endpointInput.trim()
+                            onSaveApiKey(trimmedKey)
+                            onSaveEndpoint(trimmedEndpoint)
+                            connectionStatus = "Configuration saved successfully."
+                            isConnectionError = false
                         },
                         modifier = Modifier
                             .weight(1f)
                             .testTag("save_api_key_btn")
                     ) {
-                        Text("Save Key")
+                        Text("Save Config")
                     }
 
                     Spacer(modifier = Modifier.width(8.dp))
 
                     OutlinedButton(
                         onClick = {
+                            val trimmedKey = apiKeyInput.trim()
+                            val trimmedEndpoint = endpointInput.trim()
                             isTestingConnection = true
-                            connectionStatus = "Testing connection..."
-                            onTestConnection {
+                            connectionStatus = "Testing connection to endpoint..."
+                            isConnectionError = false
+
+                            coroutineScope.launch {
+                                val result = onTestConnection(trimmedKey, trimmedEndpoint)
                                 isTestingConnection = false
-                                connectionStatus = "Connection successful! Models catalog accessible."
-                                Result.success("OK")
+                                result.onSuccess { msg ->
+                                    connectionStatus = msg
+                                    isConnectionError = false
+                                }.onFailure { error ->
+                                    connectionStatus = error.message ?: "Connection failed with unknown error"
+                                    isConnectionError = true
+                                }
                             }
                         },
+                        enabled = !isTestingConnection,
                         modifier = Modifier
-                            .weight(1.2f)
+                            .weight(1.3f)
                             .testTag("test_connection_btn")
                     ) {
                         if (isTestingConnection) {
@@ -200,7 +235,7 @@ fun SettingsScreen(
                     Text(
                         text = connectionStatus!!,
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (connectionStatus!!.contains("success", ignoreCase = true)) AragonSuccess else MaterialTheme.colorScheme.primary
+                        color = if (isConnectionError) MaterialTheme.colorScheme.error else AragonSuccess
                     )
                 }
 

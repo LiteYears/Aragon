@@ -63,4 +63,13 @@ class Converters {
     fun toTimelineEventType(value: String?): TimelineEventType =
         value?.let { runCatching { TimelineEventType.valueOf(it) }.getOrDefault(TimelineEventType.STATUS_CHANGE) }
             ?: TimelineEventType.STATUS_CHANGE
+
+    @TypeConverter
+    fun fromArtifactStage(stage: com.example.aragon.domain.model.ArtifactStage?): String =
+        stage?.name ?: com.example.aragon.domain.model.ArtifactStage.PRODUCT.name
+
+    @TypeConverter
+    fun toArtifactStage(value: String?): com.example.aragon.domain.model.ArtifactStage =
+        value?.let { runCatching { com.example.aragon.domain.model.ArtifactStage.valueOf(it) }.getOrDefault(com.example.aragon.domain.model.ArtifactStage.PRODUCT) }
+            ?: com.example.aragon.domain.model.ArtifactStage.PRODUCT
 }

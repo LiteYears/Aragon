@@ -81,6 +81,7 @@ class AragonApplication : Application() {
             timelineEventDao = database.timelineEventDao(),
             artifactManager = artifactManager,
             workspaceManager = workspaceManager,
+            ubuntuManager = ubuntuManager,
             toolRegistry = toolRegistry,
             toolExecutor = toolExecutor,
             llmProvider = nimProvider,

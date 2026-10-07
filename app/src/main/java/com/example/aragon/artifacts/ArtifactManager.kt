@@ -4,20 +4,26 @@ import com.example.aragon.computer.WorkspacePathResolver
 import com.example.aragon.data.local.ArtifactDao
 import com.example.aragon.data.local.ArtifactEntity
 import com.example.aragon.domain.model.Artifact
+import com.example.aragon.domain.model.ArtifactStage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.util.UUID
 
 class ArtifactManager(
-    private val artifactDao: ArtifactDao
+    private val artifactDao: ArtifactDao,
+    private val detector: ArtifactDetector = ArtifactDetector()
 ) {
 
     fun getArtifactsForTask(taskId: String): Flow<List<Artifact>> {
         return artifactDao.getArtifactsForTaskFlow(taskId).map { list ->
             list.map { it.toDomain() }
+        }
+    }
+
+    fun getProductArtifactsForTask(taskId: String): Flow<List<Artifact>> {
+        return artifactDao.getArtifactsForTaskFlow(taskId).map { list ->
+            list.filter { it.stage == ArtifactStage.PRODUCT }.map { it.toDomain() }
         }
     }
 
@@ -28,57 +34,30 @@ class ArtifactManager(
     }
 
     suspend fun discoverArtifacts(taskId: String, resolver: WorkspacePathResolver): List<Artifact> = withContext(Dispatchers.IO) {
-        val discovered = mutableListOf<Artifact>()
-        val targets = listOf(resolver.workspaceDir, resolver.artifactsDir)
+        val detected = detector.scan(taskId, resolver)
+        val result = mutableListOf<Artifact>()
 
-        for (dir in targets) {
-            if (!dir.exists()) continue
-            dir.walkTopDown()
-                .filter { it.isFile && !it.name.startsWith(".") && !it.path.contains(".aragon") }
-                .forEach { file ->
-                    val logicalPath = resolver.toLogicalPath(file)
-                    val report = ArtifactValidator.validate(file)
+        for (art in detected) {
+            val existing = artifactDao.getArtifactsForTask(taskId)
+                .find { it.logicalPath == art.logicalPath }
 
-                    val existing = artifactDao.getArtifactsForTask(taskId)
-                        .find { it.logicalPath == logicalPath }
+            val entity = if (existing != null) {
+                existing.copy(
+                    size = art.size,
+                    modifiedAt = art.modifiedAt,
+                    valid = art.valid,
+                    verified = art.verified,
+                    mimeType = art.mimeType,
+                    stage = art.stage,
+                    validationDetails = art.validationDetails
+                )
+            } else {
+                ArtifactEntity.fromDomain(art)
+            }
 
-                    val artifact = if (existing != null) {
-                        existing.copy(
-                            size = file.length(),
-                            modifiedAt = file.lastModified(),
-                            valid = report.isValid,
-                            verified = report.isValid,
-                            mimeType = report.mimeType,
-                            validationDetails = report.details
-                        )
-                    } else {
-                        ArtifactEntity(
-                            id = UUID.randomUUID().toString(),
-                            taskId = taskId,
-                            logicalPath = logicalPath,
-                            filename = file.name,
-                            mimeType = report.mimeType,
-                            size = file.length(),
-                            createdAt = System.currentTimeMillis(),
-                            modifiedAt = file.lastModified(),
-                            valid = report.isValid,
-                            verified = report.isValid,
-                            previewable = isPreviewable(report.mimeType),
-                            shareable = true,
-                            downloadable = true,
-                            validationDetails = report.details
-                        )
-                    }
-
-                    artifactDao.insertArtifact(artifact)
-                    discovered.add(artifact.toDomain())
-                }
+            artifactDao.insertArtifact(entity)
+            result.add(entity.toDomain())
         }
-        discovered
-    }
-
-    private fun isPreviewable(mime: String): Boolean {
-        return mime.startsWith("text/") || mime.startsWith("image/") ||
-                mime.contains("json") || mime.contains("document")
+        result
     }
 }

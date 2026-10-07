@@ -186,5 +186,48 @@ class ToolRegistry {
                 permission = ToolPermission.SAFE
             )
         )
+
+        register(
+            ToolDefinition(
+                name = "text_editor",
+                description = "Structured text editor for precise viewing, creating, replacing, patching, appending, and deleting code or text files.",
+                parameters = listOf(
+                    ToolParameter("operation", "string", "Operation type: 'view', 'create', 'replace', 'patch', 'append', 'delete'", required = true),
+                    ToolParameter("path", "string", "Logical file path (e.g. /workspace/report.py)", required = true),
+                    ToolParameter("content", "string", "Content for create or append", required = false),
+                    ToolParameter("targetContent", "string", "Exact target content block for replace or patch", required = false),
+                    ToolParameter("replacementContent", "string", "Replacement content for replace or patch", required = false),
+                    ToolParameter("startLine", "integer", "Optional starting line for view operation", required = false),
+                    ToolParameter("lineCount", "integer", "Optional number of lines to view", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "browser_action",
+                description = "Navigate web pages and interact using headless browser session.",
+                parameters = listOf(
+                    ToolParameter("action", "string", "Action to perform: 'navigate', 'click', 'input', 'scroll', 'extract'", required = true),
+                    ToolParameter("url", "string", "URL for navigate action", required = false),
+                    ToolParameter("selector", "string", "CSS/text selector for click or input", required = false),
+                    ToolParameter("text", "string", "Text to type for input action", required = false),
+                    ToolParameter("direction", "string", "Scroll direction: 'up', 'down'", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "verify_objective",
+                description = "Run deterministic verification checks against requested objective and generated artifacts.",
+                parameters = listOf(
+                    ToolParameter("objective", "string", "The objective to verify", required = true)
+                ),
+                permission = ToolPermission.SAFE
+            )
+        )
     }
 }

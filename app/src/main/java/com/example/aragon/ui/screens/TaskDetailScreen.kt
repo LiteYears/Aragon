@@ -19,7 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -112,7 +112,7 @@ fun TaskDetailScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack, modifier = Modifier.testTag("task_detail_back_btn")) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
@@ -143,27 +143,35 @@ fun TaskDetailScreen(
                 .padding(horizontal = 16.dp)
                 .testTag("task_detail_content")
         ) {
-            // Plan Approval Banner if in WAITING_FOR_USER
-            if (task.status == TaskStatus.WAITING_FOR_USER) {
+            // Plan / Human Approval Banner
+            if (task.status == TaskStatus.WAITING_FOR_USER || task.status == TaskStatus.AWAITING_PLAN_APPROVAL || task.status == TaskStatus.AWAITING_APPROVAL) {
                 item {
                     Spacer(modifier = Modifier.height(12.dp))
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (task.status == TaskStatus.AWAITING_APPROVAL)
+                                MaterialTheme.colorScheme.errorContainer
+                            else
+                                MaterialTheme.colorScheme.primaryContainer
+                        ),
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth().testTag("plan_approval_card")
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text(
-                                text = "Action Required: Plan Approval",
+                                text = if (task.status == TaskStatus.AWAITING_APPROVAL) "Security Approval Required" else "Action Required: Plan Approval",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                color = if (task.status == TaskStatus.AWAITING_APPROVAL) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Review the proposed objectives and steps below. Tap approve to authorize the agent to execute tools in the Linux environment.",
+                                text = if (task.status == TaskStatus.AWAITING_APPROVAL)
+                                    "A sensitive operation (such as file modification, network call, or system configuration) requires your explicit permission before execution."
+                                else
+                                    "Review the proposed objectives and steps below. Tap approve to authorize the agent to execute tools in the Linux environment.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f)
+                                color = if (task.status == TaskStatus.AWAITING_APPROVAL) MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f) else MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f)
                             )
                             Spacer(modifier = Modifier.height(12.dp))
                             Button(
@@ -173,7 +181,7 @@ fun TaskDetailScreen(
                             ) {
                                 Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Approve & Execute Plan", fontWeight = FontWeight.Bold)
+                                Text("Approve & Continue", fontWeight = FontWeight.Bold)
                             }
                         }
                     }

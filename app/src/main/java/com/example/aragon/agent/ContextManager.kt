@@ -2,47 +2,82 @@ package com.example.aragon.agent
 
 import com.example.aragon.computer.WorkspacePathResolver
 import com.example.aragon.domain.model.Artifact
+import com.example.aragon.domain.model.FailedApproach
 import com.example.aragon.domain.model.PlanStep
 import com.example.aragon.domain.model.Project
 import com.example.aragon.domain.model.Task
 import com.example.aragon.domain.model.ToolResult
 import com.example.aragon.llm.LlmMessage
 import com.example.aragon.llm.LlmRole
+import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 
-class ContextManager {
+class ContextManager(
+    private val maxInlineOutputLength: Int = 1200,
+    private val maxRecentResultsInline: Int = 6
+) {
+    private val failedApproaches = mutableListOf<FailedApproach>()
+
+    fun recordFailedApproach(strategy: String, error: String, context: String) {
+        failedApproaches.add(
+            FailedApproach(
+                id = UUID.randomUUID().toString(),
+                strategy = strategy,
+                error = error.take(300),
+                context = context.take(300),
+                timestamp = System.currentTimeMillis()
+            )
+        )
+    }
+
+    fun getFailedApproaches(): List<FailedApproach> = failedApproaches.toList()
+
+    fun storeObservation(
+        resolver: WorkspacePathResolver,
+        callId: String,
+        stdout: String,
+        stderr: String
+    ): String {
+        val obsDir = resolver.observationsDir
+        obsDir.mkdirs()
+
+        val obsFile = File(obsDir, "obs_${callId}.log")
+        obsFile.writeText("=== STDOUT ===\n$stdout\n\n=== STDERR ===\n$stderr\n")
+        return resolver.toLogicalPath(obsFile)
+    }
 
     fun buildSystemPrompt(
         project: Project?,
         resolver: WorkspacePathResolver
     ): String {
         return buildString {
-            appendLine("You are ARAGON, a personal, phone-first autonomous computer agent operating on an Android device with an integrated local Ubuntu Linux userspace.")
+            appendLine("You are ARAGON, a personal autonomous computer agent operating inside a local Linux userspace.")
             appendLine()
-            appendLine("### CORE ARCHITECTURAL PRINCIPLES:")
-            appendLine("1. THE RUNTIME IS THE SOURCE OF TRUTH. You are an operator of a real computer. Model claims (e.g., 'I created the file') are NEVER facts until observed via tools.")
-            appendLine("2. LOGICAL ENVIRONMENT: You operate exclusively within logical paths:")
-            appendLine("   - /workspace (primary task workspace)")
-            appendLine("   - /workspace/.aragon/ (agent memory, state, runtime)")
-            appendLine("   - /artifacts (generated outputs)")
-            appendLine("   Never use Android private paths like /data/data/...")
-            appendLine("3. STRUCTURED TOOL CALLS ONLY: You MUST invoke structured tools. Model prose is NEVER executed directly.")
-            appendLine("4. VERIFICATION MANDATE: A task is only complete when the user's objective is verified on disk.")
-            appendLine("5. PERSISTENT FILESYSTEM MEMORY: Durable data belongs in files inside /workspace, not crammed endlessly into conversation context.")
-            appendLine("6. PYTHON INTEGRATION: Python code is written to /workspace/.aragon/runtime/<callId>.py, verified via SHA-256 hash, and executed.")
+            appendLine("### CORE EXECUTION PRINCIPLES:")
+            appendLine("1. THE RUNTIME IS AUTHORITATIVE. Your claims are hypotheses until verified on disk via tools.")
+            appendLine("2. LOGICAL FILESYSTEM:")
+            appendLine("   - /workspace (primary task files)")
+            appendLine("   - /process (scratch files, raw downloads, intermediate outputs)")
+            appendLine("   - /artifacts (final deliverables: DOCX, XLSX, PDF, web applications)")
+            appendLine("   - /tmp (temporary caches)")
+            appendLine("3. STRUCTURED TOOL CALLS ONLY. Never output pseudo-syntax like <tool>run</tool>.")
+            appendLine("4. VERIFICATION MANDATE: Tasks only complete when objective artifacts exist, are non-empty, and structurally valid.")
+            appendLine("5. PYTHON SCRIPTS: Always written to /workspace/.aragon/runtime/scripts/, verified via SHA-256, and executed.")
+            appendLine("6. CONTEXT TRANSFER: Large command and observation logs are stored on disk in /workspace/.aragon/observations/.")
             appendLine()
 
             if (project != null && project.instructions.isNotBlank()) {
-                appendLine("### PROJECT INSTRUCTIONS (${project.name}):")
+                appendLine("### PROJECT DIRECTIVE (${project.name}):")
                 appendLine(project.instructions)
                 appendLine()
             }
 
-            // Read externalized memory notes if present
-            val notesFile = File(resolver.memoryDir, "notes.md")
-            if (notesFile.exists() && notesFile.length() > 0) {
-                appendLine("### DURABLE WORKING MEMORY (notes.md):")
-                appendLine(notesFile.readText().take(2000))
+            // Retrieve durable notes if available
+            val memory = retrieveRelevantMemory(resolver)
+            if (memory.isNotBlank()) {
+                appendLine("### DURABLE MEMORY:")
+                appendLine(memory)
                 appendLine()
             }
         }
@@ -67,7 +102,7 @@ class ContextManager {
             )
         )
 
-        // 2. Initial User Request
+        // 2. User Objective
         messages.add(
             LlmMessage(
                 role = LlmRole.USER,
@@ -75,20 +110,21 @@ class ContextManager {
             )
         )
 
-        // 3. Current State & Plan Context
+        // 3. Compact state overview
         val stateSummary = buildString {
-            appendLine("### CURRENT AGENT STATE:")
+            appendLine("### AGENT STATE:")
             appendLine("- Status: ${task.status}")
             appendLine("- Iteration: ${task.iteration}")
             appendLine("- Current Objective: ${task.currentObjective.ifBlank { task.title }}")
 
             if (planSteps.isNotEmpty()) {
-                appendLine("\n### ACTIVE PLAN:")
+                appendLine("\n### HIERARCHICAL PLAN:")
                 planSteps.forEach { step ->
                     val mark = when (step.status) {
                         com.example.aragon.domain.model.StepStatus.COMPLETED -> "[✓]"
-                        com.example.aragon.domain.model.StepStatus.RUNNING -> "[▶]"
+                        com.example.aragon.domain.model.StepStatus.IN_PROGRESS -> "[▶]"
                         com.example.aragon.domain.model.StepStatus.FAILED -> "[✗]"
+                        com.example.aragon.domain.model.StepStatus.BLOCKED -> "[!]"
                         else -> "[ ]"
                     }
                     appendLine("$mark Step ${step.stepNumber}: ${step.title}")
@@ -98,13 +134,19 @@ class ContextManager {
             if (artifacts.isNotEmpty()) {
                 appendLine("\n### DISCOVERED ARTIFACTS:")
                 artifacts.forEach { art ->
-                    appendLine("- ${art.filename} (${art.size} bytes, Valid: ${art.valid}) -> ${art.logicalPath}")
+                    appendLine("- ${art.filename} (${art.size}B, Stage: ${art.stage}, Valid: ${art.valid}) -> ${art.logicalPath}")
+                }
+            }
+
+            if (failedApproaches.isNotEmpty()) {
+                appendLine("\n### FAILED APPROACH MEMORY (DO NOT REPEAT):")
+                failedApproaches.takeLast(3).forEach {
+                    appendLine("- Strategy '${it.strategy}' failed: ${it.error}")
                 }
             }
 
             if (!loopWarning.isNullOrBlank()) {
-                appendLine("\n⚠️ RECOVERY DIRECTIVE: $loopWarning")
-                appendLine("Gather new observations or adjust approach rather than repeating.")
+                appendLine("\n⚠️ RUNTIME DIRECTIVE: $loopWarning")
             }
         }
 
@@ -115,29 +157,69 @@ class ContextManager {
             )
         )
 
-        // 4. Recent Tool Executions & Observations
-        for ((toolName, result) in recentToolResults.takeLast(5)) {
-            val toolContent = buildString {
-                appendLine("Tool executed: $toolName")
-                appendLine("Exit code: ${result.exitCode}")
-                appendLine("Success: ${result.success}")
+        // 4. Recent tool executions with compressed outputs
+        val resultsToInclude = recentToolResults.takeLast(maxRecentResultsInline)
+        for ((toolName, result) in resultsToInclude) {
+            val content = buildString {
+                appendLine("Tool: $toolName")
+                appendLine("ExitCode: ${result.exitCode}, Success: ${result.success}")
                 if (result.stdout.isNotBlank()) {
-                    appendLine("STDOUT:\n${result.stdout.take(1500)}")
+                    appendLine("STDOUT (truncated):\n${result.stdout.take(maxInlineOutputLength)}")
                 }
                 if (result.stderr.isNotBlank()) {
-                    appendLine("STDERR:\n${result.stderr.take(1000)}")
+                    appendLine("STDERR:\n${result.stderr.take(maxInlineOutputLength)}")
+                }
+                if (result.artifacts.isNotEmpty()) {
+                    appendLine("Artifacts produced: ${result.artifacts.joinToString()}")
                 }
             }
+
             messages.add(
                 LlmMessage(
                     role = LlmRole.TOOL,
                     name = toolName,
                     toolCallId = result.callId,
-                    content = toolContent
+                    content = content
                 )
             )
         }
 
         return messages
+    }
+
+    fun compressContext(
+        resolver: WorkspacePathResolver,
+        task: Task,
+        messages: List<LlmMessage>
+    ): String {
+        val summaryFile = File(resolver.memoryDir, "context_summary.md")
+        val summaryContent = buildString {
+            appendLine("# Compressed Context Transfer Snapshot")
+            appendLine("Task: ${task.title} (ID: ${task.id})")
+            appendLine("Timestamp: ${System.currentTimeMillis()}")
+            appendLine("Original Request: ${task.originalRequest}")
+            appendLine("Iterations Completed: ${task.iteration}")
+            appendLine("Messages Count: ${messages.size}")
+            appendLine("\n## Key Decisions and Failures:")
+            failedApproaches.forEach {
+                appendLine("- Failed: ${it.strategy} (${it.error})")
+            }
+        }
+        summaryFile.writeText(summaryContent)
+        return resolver.toLogicalPath(summaryFile)
+    }
+
+    fun retrieveRelevantMemory(resolver: WorkspacePathResolver): String {
+        val notesFile = File(resolver.memoryDir, "notes.md")
+        val summaryFile = File(resolver.memoryDir, "context_summary.md")
+
+        val sb = StringBuilder()
+        if (notesFile.exists() && notesFile.length() > 0L) {
+            sb.appendLine(notesFile.readText().take(1500))
+        }
+        if (summaryFile.exists() && summaryFile.length() > 0L) {
+            sb.appendLine(summaryFile.readText().take(1000))
+        }
+        return sb.toString()
     }
 }

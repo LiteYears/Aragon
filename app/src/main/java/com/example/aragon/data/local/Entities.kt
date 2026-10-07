@@ -125,7 +125,12 @@ data class PlanStepEntity(
     val status: StepStatus,
     val toolName: String?,
     val verified: Boolean,
-    val resultSummary: String?
+    val resultSummary: String?,
+    val dependencies: List<String> = emptyList(),
+    val attemptCount: Int = 0,
+    val startedAt: Long? = null,
+    val completedAt: Long? = null,
+    val verificationStatus: String? = null
 ) {
     fun toDomain(): PlanStep = PlanStep(
         id = id,
@@ -134,6 +139,11 @@ data class PlanStepEntity(
         title = title,
         description = description,
         status = status,
+        dependencies = dependencies,
+        attemptCount = attemptCount,
+        startedAt = startedAt,
+        completedAt = completedAt,
+        verificationStatus = verificationStatus,
         toolName = toolName,
         verified = verified,
         resultSummary = resultSummary
@@ -147,6 +157,11 @@ data class PlanStepEntity(
             title = step.title,
             description = step.description,
             status = step.status,
+            dependencies = step.dependencies,
+            attemptCount = step.attemptCount,
+            startedAt = step.startedAt,
+            completedAt = step.completedAt,
+            verificationStatus = step.verificationStatus,
             toolName = step.toolName,
             verified = step.verified,
             resultSummary = step.resultSummary
@@ -169,7 +184,8 @@ data class ArtifactEntity(
     val previewable: Boolean,
     val shareable: Boolean,
     val downloadable: Boolean,
-    val validationDetails: String
+    val validationDetails: String,
+    val stage: com.example.aragon.domain.model.ArtifactStage = com.example.aragon.domain.model.ArtifactStage.PRODUCT
 ) {
     fun toDomain(): Artifact = Artifact(
         id = id,
@@ -180,6 +196,7 @@ data class ArtifactEntity(
         size = size,
         createdAt = createdAt,
         modifiedAt = modifiedAt,
+        stage = stage,
         valid = valid,
         verified = verified,
         previewable = previewable,
@@ -198,6 +215,7 @@ data class ArtifactEntity(
             size = artifact.size,
             createdAt = artifact.createdAt,
             modifiedAt = artifact.modifiedAt,
+            stage = artifact.stage,
             valid = artifact.valid,
             verified = artifact.verified,
             previewable = artifact.previewable,

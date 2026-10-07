@@ -27,18 +27,28 @@ class NvidiaNimProvider(
         .build()
 ) : LlmProvider {
 
-    private val baseUrl = "https://integrate.api.nvidia.com/v1"
+    private val baseUrl: String
+        get() = preferencesManager.endpoint.value.trim().removeSuffix("/")
+
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+
+    companion object {
+        const val VERIFIED_FALLBACK_MODEL = "meta/llama-3.2-11b-vision-instruct"
+        private val DEPRECATED_MODELS = setOf(
+            "meta/llama-3.3-70b-instruct"
+        )
+    }
 
     override suspend fun listModels(): List<ModelInfo> = withContext(Dispatchers.IO) {
         val apiKey = preferencesManager.nvidiaApiKey.value.trim()
+        val currentUrl = baseUrl
         if (apiKey.isBlank()) {
             return@withContext modelRegistry.getAllModels()
         }
 
         try {
             val request = Request.Builder()
-                .url("$baseUrl/models")
+                .url("$currentUrl/models")
                 .header("Authorization", "Bearer $apiKey")
                 .header("Accept", "application/json")
                 .get()
@@ -52,11 +62,32 @@ class NvidiaNimProvider(
                 val json = JSONObject(bodyStr)
                 val data = json.optJSONArray("data") ?: return@withContext modelRegistry.getAllModels()
 
+                // Known active models verified to be accessible without 404 Account Function errors
+                val verifiedIds = setOf(
+                    VERIFIED_FALLBACK_MODEL,
+                    "meta/llama-3.2-90b-vision-instruct",
+                    "openai/gpt-oss-20b",
+                    "nvidia/nemotron-3.5-lightning-30b-a3b",
+                    "google/diffusiongemma-26b-a4b-it",
+                    "nvidia/nemotron-3-super-120b-a12b",
+                    "meta/muse-glimmer-30b",
+                    "nvidia/ising-calibration-1.5-31b",
+                    "nvidia/nemotron-3-ultra-550b-a55b"
+                )
+
                 val resultList = mutableListOf<ModelInfo>()
                 for (i in 0 until data.length()) {
                     val m = data.getJSONObject(i)
                     val id = m.optString("id", "")
-                    if (id.isNotBlank()) {
+                    // If connecting to standard integrate.api.nvidia.com, filter to verified allowed models
+                    // to avoid giving users 404 'Function not found for account' on unsupported catalog items
+                    val isSupported = if (currentUrl.contains("nvidia.com")) {
+                        id in verifiedIds
+                    } else {
+                        id.isNotBlank() && id !in DEPRECATED_MODELS
+                    }
+
+                    if (isSupported) {
                         val publisher = m.optString("owned_by", id.substringBefore("/"))
                         val name = id.substringAfter("/").replace("-", " ")
                             .split(" ").joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
@@ -67,15 +98,30 @@ class NvidiaNimProvider(
                                 name = name,
                                 publisher = publisher,
                                 capabilities = modelRegistry.resolveCapabilities(id),
-                                description = "NVIDIA NIM catalog model ($id)"
+                                description = "NVIDIA NIM verified model ($id)"
                             )
                         )
                     }
                 }
 
                 if (resultList.isNotEmpty()) {
-                    modelRegistry.updateModels(resultList)
-                    return@withContext resultList
+                    val verifiedOrder = listOf(
+                        VERIFIED_FALLBACK_MODEL,
+                        "meta/llama-3.2-90b-vision-instruct",
+                        "openai/gpt-oss-20b",
+                        "nvidia/nemotron-3.5-lightning-30b-a3b",
+                        "google/diffusiongemma-26b-a4b-it",
+                        "nvidia/nemotron-3-super-120b-a12b",
+                        "meta/muse-glimmer-30b",
+                        "nvidia/nemotron-3-ultra-550b-a55b"
+                    )
+                    val sortedList = resultList.sortedBy { m ->
+                        val idx = verifiedOrder.indexOf(m.id)
+                        if (idx != -1) idx else 100 + resultList.indexOf(m)
+                    }
+
+                    modelRegistry.updateModels(sortedList)
+                    return@withContext sortedList
                 }
             }
         } catch (e: Exception) {
@@ -84,12 +130,94 @@ class NvidiaNimProvider(
         modelRegistry.getAllModels()
     }
 
+    suspend fun testConnection(
+        apiKeyOverride: String? = null,
+        endpointOverride: String? = null
+    ): Result<String> = withContext(Dispatchers.IO) {
+        val key = apiKeyOverride?.trim()?.ifBlank { null }
+            ?: preferencesManager.nvidiaApiKey.value.trim()
+        if (key.isBlank()) {
+            return@withContext Result.failure(IllegalStateException("API key is empty. Please enter your key."))
+        }
+
+        val url = (endpointOverride?.trim()?.removeSuffix("/")?.ifBlank { null }
+            ?: baseUrl).removeSuffix("/")
+
+        val pingModel = VERIFIED_FALLBACK_MODEL
+        val payload = JSONObject().apply {
+            put("model", pingModel)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", "ping")
+                })
+            })
+            put("max_tokens", 5)
+            put("temperature", 0.1)
+        }
+
+        val httpRequest = Request.Builder()
+            .url("$url/chat/completions")
+            .header("Authorization", "Bearer $key")
+            .header("Content-Type", "application/json")
+            .post(payload.toString().toRequestBody(jsonMediaType))
+            .build()
+
+        try {
+            client.newCall(httpRequest).execute().use { response ->
+                val body = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    val err = parseErrorMessage(response.code, body)
+                    return@withContext Result.failure(IllegalStateException("Endpoint returned HTTP ${response.code}: $err"))
+                }
+                Result.success("Connection verified! Model $pingModel responded successfully (HTTP 200).")
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     override suspend fun complete(request: LlmRequest): LlmResponse = withContext(Dispatchers.IO) {
         val apiKey = preferencesManager.nvidiaApiKey.value.trim()
         if (apiKey.isBlank()) {
             throw IllegalStateException("Aragon NIM API key is not configured. Please enter your key in Settings.")
         }
 
+        try {
+            executeComplete(request, apiKey)
+        } catch (e: Exception) {
+            val errorMsg = e.message.orEmpty()
+            // If the model failed because of tool choice or function permission (404/410/400),
+            // automatically retry with VERIFIED_FALLBACK_MODEL or without unsupported tool calling
+            if (shouldFallbackModel(errorMsg)) {
+                if (request.model != VERIFIED_FALLBACK_MODEL) {
+                    val fallbackReq = request.copy(model = VERIFIED_FALLBACK_MODEL)
+                    preferencesManager.setSelectedModel(VERIFIED_FALLBACK_MODEL)
+                    return@withContext executeComplete(fallbackReq, apiKey)
+                } else if (!request.tools.isNullOrEmpty() && (errorMsg.contains("tool", ignoreCase = true) || errorMsg.contains("400"))) {
+                    // Retry fallback model without tool calling headers
+                    val noToolsReq = request.copy(tools = null)
+                    return@withContext executeComplete(noToolsReq, apiKey)
+                }
+            }
+            throw e
+        }
+    }
+
+    private fun shouldFallbackModel(errorMessage: String): Boolean {
+        val lower = errorMessage.lowercase()
+        return lower.contains("not found for account") ||
+                lower.contains("404") ||
+                lower.contains("end of life") ||
+                lower.contains("410") ||
+                lower.contains("function") ||
+                lower.contains("auto tool choice") ||
+                lower.contains("tool choice requires") ||
+                lower.contains("tool-call") ||
+                lower.contains("unsupported")
+    }
+
+    private fun executeComplete(request: LlmRequest, apiKey: String): LlmResponse {
         val payload = buildRequestJson(request, stream = false)
         val httpRequest = Request.Builder()
             .url("$baseUrl/chat/completions")
@@ -101,13 +229,11 @@ class NvidiaNimProvider(
         client.newCall(httpRequest).execute().use { response ->
             val body = response.body?.string() ?: ""
             if (!response.isSuccessful) {
-                val errorMsg = runCatching {
-                    JSONObject(body).optJSONObject("error")?.optString("message")
-                }.getOrNull() ?: body
+                val errorMsg = parseErrorMessage(response.code, body)
                 throw IllegalStateException("NVIDIA NIM API Error (${response.code}): $errorMsg")
             }
 
-            parseResponseJson(body)
+            return parseResponseJson(body)
         }
     }
 
@@ -118,7 +244,10 @@ class NvidiaNimProvider(
             return@flow
         }
 
-        val payload = buildRequestJson(request, stream = true)
+        val effectiveModel = if (request.model in DEPRECATED_MODELS) VERIFIED_FALLBACK_MODEL else request.model
+        val effectiveRequest = request.copy(model = effectiveModel)
+
+        val payload = buildRequestJson(effectiveRequest, stream = true)
         val httpRequest = Request.Builder()
             .url("$baseUrl/chat/completions")
             .header("Authorization", "Bearer $apiKey")
@@ -130,7 +259,7 @@ class NvidiaNimProvider(
         try {
             client.newCall(httpRequest).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val err = response.body?.string() ?: ""
+                    val err = parseErrorMessage(response.code, response.body?.string() ?: "")
                     emit(LlmStreamEvent.Error(IllegalStateException("NVIDIA NIM Streaming Error (${response.code}): $err")))
                     return@use
                 }
@@ -222,6 +351,27 @@ class NvidiaNimProvider(
         }
     }.flowOn(Dispatchers.IO)
 
+    private fun parseErrorMessage(code: Int, body: String): String {
+        return runCatching {
+            val json = JSONObject(body)
+            val errObj = json.optJSONObject("error")
+            val detail = json.optString("detail", "")
+            val title = json.optString("title", "")
+            val msg = errObj?.optString("message", "") ?: detail.ifEmpty { title }
+
+            when {
+                detail.contains("Not found for account") ->
+                    "Model function permission not granted for account (404): $detail"
+                detail.contains("end of life") || code == 410 ->
+                    "Model reached end-of-life on NVIDIA NIM (410 Gone): $detail"
+                msg.isNotBlank() ->
+                    msg
+                else ->
+                    "HTTP $code: $body"
+            }
+        }.getOrDefault("HTTP $code: $body")
+    }
+
     private fun buildRequestJson(request: LlmRequest, stream: Boolean): JSONObject {
         val root = JSONObject()
         root.put("model", request.model)
@@ -233,7 +383,11 @@ class NvidiaNimProvider(
         for (m in request.messages) {
             val msgObj = JSONObject()
             msgObj.put("role", m.role.name.lowercase())
-            msgObj.put("content", m.content)
+            if (m.content.isNotEmpty() || m.toolCalls.isNullOrEmpty()) {
+                msgObj.put("content", m.content)
+            } else {
+                msgObj.put("content", JSONObject.NULL)
+            }
             if (m.name != null) msgObj.put("name", m.name)
             if (m.toolCallId != null) msgObj.put("tool_call_id", m.toolCallId)
 
@@ -274,8 +428,15 @@ class NvidiaNimProvider(
 
         val choice = choices.getJSONObject(0)
         val message = choice.optJSONObject("message") ?: JSONObject()
-        val content = message.optString("content", "")
-        val reasoning = message.optString("reasoning_content", "").ifEmpty { null }
+        val content = if (message.isNull("content")) "" else message.optString("content", "").let { if (it == "null") "" else it }
+        val reasoningRaw = if (!message.isNull("reasoning_content")) {
+            message.optString("reasoning_content", "")
+        } else if (!message.isNull("reasoning")) {
+            message.optString("reasoning", "")
+        } else {
+            ""
+        }
+        val reasoning = reasoningRaw.takeIf { it.isNotBlank() && it != "null" }
         val finishReason = choice.optString("finish_reason", "")
 
         val toolCallsList = mutableListOf<LlmToolCall>()
