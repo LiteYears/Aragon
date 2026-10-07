@@ -292,3 +292,9 @@ data class BrowserSessionState(
     val capabilityState: String = "HEADLESS_TEXT_EXTRACTOR",
     val lastScreenshotPath: String? = null
 )
+
+enum class ExecutionBackend {
+    LOCAL_COMPUTER, // Built-in POSIX / Android userspace execution
+    OPEN_SANDBOX    // Isolated OpenSandbox microVM / Docker container
+}
+

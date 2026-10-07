@@ -29,6 +29,9 @@ class AragonApplication : Application() {
     lateinit var processManager: ProcessManager
         private set
 
+    lateinit var openSandboxManager: com.example.aragon.opensandbox.OpenSandboxManager
+        private set
+
     lateinit var ubuntuManager: UbuntuManager
         private set
 
@@ -63,15 +66,24 @@ class AragonApplication : Application() {
         database = AragonDatabase.getInstance(this)
         preferencesManager = PreferencesManager(this)
         workspaceManager = WorkspaceManager(this)
-        processManager = ProcessManager()
-        ubuntuManager = UbuntuManager(this)
+        openSandboxManager = com.example.aragon.opensandbox.OpenSandboxManager(preferencesManager)
+        processManager = ProcessManager(
+            openSandboxManagerProvider = { openSandboxManager },
+            executionBackendProvider = { preferencesManager.executionBackend.value }
+        )
+        ubuntuManager = UbuntuManager(this, preferencesManager, openSandboxManager)
         toolRegistry = ToolRegistry()
-        toolExecutor = ToolExecutor(processManager)
+        toolExecutor = ToolExecutor(
+            processManager = processManager,
+            openSandboxManager = openSandboxManager,
+            preferencesManager = preferencesManager
+        )
         modelRegistry = ModelRegistry()
         nimProvider = NvidiaNimProvider(preferencesManager, modelRegistry)
         artifactManager = ArtifactManager(database.artifactDao())
         taskRepository = TaskRepository(database.taskDao(), database.planStepDao(), database.timelineEventDao())
         projectRepository = ProjectRepository(database.projectDao())
+
 
         agentHarness = AgentHarness(
             taskDao = database.taskDao(),

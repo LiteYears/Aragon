@@ -1,6 +1,7 @@
 package com.example.aragon.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,12 +24,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -66,10 +68,19 @@ import com.example.aragon.domain.model.TaskStatus
 import com.example.aragon.domain.model.TimelineEvent
 import com.example.aragon.domain.model.TimelineEventType
 import com.example.aragon.ui.components.ArtifactCard
-import com.example.ui.theme.AragonObsidianBg
-import com.example.ui.theme.AragonSuccess
-import com.example.ui.theme.AragonSurface
-import com.example.ui.theme.AragonSurfaceVariant
+import com.example.aragon.ui.components.ArtifactViewerDialog
+import com.example.ui.theme.AmoledAccent
+import com.example.ui.theme.AmoledBg
+import com.example.ui.theme.AmoledBorder
+import com.example.ui.theme.AmoledCard
+import com.example.ui.theme.AmoledElevated
+import com.example.ui.theme.AmoledError
+import com.example.ui.theme.AmoledInteractive
+import com.example.ui.theme.AmoledSuccess
+import com.example.ui.theme.AmoledTextMuted
+import com.example.ui.theme.AmoledTextPrimary
+import com.example.ui.theme.AmoledTextSecondary
+import com.example.ui.theme.AmoledWarning
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,9 +95,16 @@ fun TaskDetailScreen(
     onResume: () -> Unit,
     onCancel: () -> Unit
 ) {
+    var viewingArtifact by remember { mutableStateOf<Artifact?>(null) }
+
     if (task == null) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("Task not found", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(AmoledBg),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("Task not found", color = AmoledTextSecondary)
         }
         return
     }
@@ -94,19 +112,25 @@ fun TaskDetailScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = AragonSurface),
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = AmoledBg,
+                    titleContentColor = AmoledTextPrimary,
+                    navigationIconContentColor = AmoledTextPrimary
+                ),
                 title = {
                     Column {
                         Text(
                             text = task.title,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
+                            color = AmoledTextPrimary,
                             maxLines = 1
                         )
                         Text(
-                            text = "${task.status} • Model: ${task.selectedModel.substringAfter("/")}",
+                            text = "${task.status.name} • Iteration ${task.iteration} • ${task.selectedModel.substringAfter("/")}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            fontFamily = FontFamily.Monospace,
+                            color = AmoledTextSecondary
                         )
                     }
                 },
@@ -116,25 +140,24 @@ fun TaskDetailScreen(
                     }
                 },
                 actions = {
-                    // Task controls
                     if (task.status.isActive) {
                         IconButton(onClick = onPause, modifier = Modifier.testTag("task_pause_btn")) {
-                            Icon(Icons.Default.Pause, contentDescription = "Pause", tint = MaterialTheme.colorScheme.primary)
+                            Icon(Icons.Default.Pause, contentDescription = "Pause", tint = AmoledTextPrimary)
                         }
                     } else if (task.status == TaskStatus.PAUSED) {
                         IconButton(onClick = onResume, modifier = Modifier.testTag("task_resume_btn")) {
-                            Icon(Icons.Default.PlayArrow, contentDescription = "Resume", tint = AragonSuccess)
+                            Icon(Icons.Default.PlayArrow, contentDescription = "Resume", tint = AmoledSuccess)
                         }
                     }
                     if (!task.status.isTerminal) {
                         IconButton(onClick = onCancel, modifier = Modifier.testTag("task_cancel_btn")) {
-                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = MaterialTheme.colorScheme.error)
+                            Icon(Icons.Default.Close, contentDescription = "Cancel", tint = AmoledError)
                         }
                     }
                 }
             )
         },
-        containerColor = AragonObsidianBg
+        containerColor = AmoledBg
     ) { innerPadding ->
         LazyColumn(
             modifier = Modifier
@@ -143,60 +166,208 @@ fun TaskDetailScreen(
                 .padding(horizontal = 16.dp)
                 .testTag("task_detail_content")
         ) {
-            // Plan / Human Approval Banner
-            if (task.status == TaskStatus.WAITING_FOR_USER || task.status == TaskStatus.AWAITING_PLAN_APPROVAL || task.status == TaskStatus.AWAITING_APPROVAL) {
-                item {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (task.status == TaskStatus.AWAITING_APPROVAL)
-                                MaterialTheme.colorScheme.errorContainer
-                            else
-                                MaterialTheme.colorScheme.primaryContainer
-                        ),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth().testTag("plan_approval_card")
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
+            // Task Objective & Status Overview
+            item {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = AmoledCard),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, AmoledBorder),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text(
-                                text = if (task.status == TaskStatus.AWAITING_APPROVAL) "Security Approval Required" else "Action Required: Plan Approval",
-                                style = MaterialTheme.typography.titleMedium,
+                                text = "TASK OBJECTIVE",
+                                style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
-                                color = if (task.status == TaskStatus.AWAITING_APPROVAL) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer
+                                color = AmoledTextMuted,
+                                letterSpacing = 1.sp
+                            )
+                            Surface(
+                                color = when (task.status) {
+                                    TaskStatus.COMPLETED -> AmoledSuccess.copy(alpha = 0.15f)
+                                    TaskStatus.FAILED -> AmoledError.copy(alpha = 0.15f)
+                                    TaskStatus.EXECUTING, TaskStatus.OBSERVING -> AmoledAccent.copy(alpha = 0.15f)
+                                    else -> AmoledInteractive
+                                },
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(
+                                    1.dp,
+                                    when (task.status) {
+                                        TaskStatus.COMPLETED -> AmoledSuccess.copy(alpha = 0.4f)
+                                        TaskStatus.FAILED -> AmoledError.copy(alpha = 0.4f)
+                                        TaskStatus.EXECUTING, TaskStatus.OBSERVING -> AmoledAccent.copy(alpha = 0.4f)
+                                        else -> AmoledBorder
+                                    }
+                                )
+                            ) {
+                                Text(
+                                    text = task.status.name,
+                                    color = when (task.status) {
+                                        TaskStatus.COMPLETED -> AmoledSuccess
+                                        TaskStatus.FAILED -> AmoledError
+                                        TaskStatus.EXECUTING, TaskStatus.OBSERVING -> AmoledAccent
+                                        else -> AmoledTextSecondary
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = task.originalRequest,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AmoledTextPrimary,
+                            lineHeight = 20.sp
+                        )
+
+                        if (task.finalSummary.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Divider(color = AmoledBorder)
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "Executive Summary",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = AmoledSuccess
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = if (task.status == TaskStatus.AWAITING_APPROVAL)
-                                    "A sensitive operation (such as file modification, network call, or system configuration) requires your explicit permission before execution."
-                                else
-                                    "Review the proposed objectives and steps below. Tap approve to authorize the agent to execute tools in the Linux environment.",
+                                text = task.finalSummary,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (task.status == TaskStatus.AWAITING_APPROVAL) MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f) else MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f)
+                                color = AmoledTextSecondary
                             )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Button(
-                                onClick = onApprovePlan,
-                                colors = ButtonDefaults.buttonColors(containerColor = AragonSuccess),
-                                modifier = Modifier.fillMaxWidth().testTag("approve_plan_btn")
+                        }
+
+                        if (task.lastError != null) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Surface(
+                                color = AmoledError.copy(alpha = 0.1f),
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(1.dp, AmoledError.copy(alpha = 0.3f)),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Approve & Continue", fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = "Error: ${task.lastError}",
+                                    color = AmoledError,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.padding(10.dp)
+                                )
                             }
                         }
                     }
                 }
             }
 
-            // Plan / Objectives Checklist Section
+            // PROMINENT DELIVERABLES & GENERATED FILES SECTION
+            if (artifacts.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(18.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Description,
+                                contentDescription = null,
+                                tint = AmoledTextPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Generated Deliverables (${artifacts.size})",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = AmoledTextPrimary
+                            )
+                        }
+                        Text(
+                            text = "Tap to view or download",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmoledTextMuted
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+
+                items(artifacts) { artifact ->
+                    ArtifactCard(
+                        artifact = artifact,
+                        onView = { viewingArtifact = it }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+            }
+
+            // Plan / Approval Card
+            if (task.status == TaskStatus.WAITING_FOR_USER || task.status == TaskStatus.AWAITING_PLAN_APPROVAL || task.status == TaskStatus.AWAITING_APPROVAL) {
+                item {
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = AmoledCard),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, AmoledBorderActive),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("plan_approval_card")
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = if (task.status == TaskStatus.AWAITING_APPROVAL) "Dangerous Action Approval" else "Review Execution Plan",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = AmoledTextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "The agent is paused waiting for your authorization to proceed.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AmoledTextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Button(
+                                    onClick = onApprovePlan,
+                                    colors = ButtonDefaults.buttonColors(containerColor = AmoledTextPrimary, contentColor = AmoledBg),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.testTag("approve_plan_btn")
+                                ) {
+                                    Text("Approve & Continue", fontWeight = FontWeight.Bold)
+                                }
+                                OutlinedButton(
+                                    onClick = onCancel,
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AmoledError),
+                                    border = BorderStroke(1.dp, AmoledBorder),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.testTag("reject_plan_btn")
+                                ) {
+                                    Text("Cancel")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Execution Plan Steps
             if (planSteps.isNotEmpty()) {
                 item {
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(20.dp))
                     Text(
-                        text = "Objectives & Plan",
+                        text = "Hierarchical Plan (${planSteps.count { it.status == StepStatus.COMPLETED }}/${planSteps.size} Completed)",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = AmoledTextPrimary
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                 }
@@ -207,33 +378,14 @@ fun TaskDetailScreen(
                 }
             }
 
-            // Discovered Artifacts Section
-            if (artifacts.isNotEmpty()) {
-                item {
-                    Spacer(modifier = Modifier.height(20.dp))
-                    Text(
-                        text = "Generated Artifacts",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-
-                items(artifacts) { artifact ->
-                    ArtifactCard(artifact = artifact)
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-            }
-
             // Live Timeline Events Section
             item {
                 Spacer(modifier = Modifier.height(20.dp))
                 Text(
-                    text = "Execution Timeline",
+                    text = "Execution Feed (${timeline.size} Events)",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = AmoledTextPrimary
                 )
                 Spacer(modifier = Modifier.height(8.dp))
             }
@@ -241,14 +393,15 @@ fun TaskDetailScreen(
             if (timeline.isEmpty()) {
                 item {
                     Surface(
-                        color = AragonSurfaceVariant,
+                        color = AmoledCard,
                         shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, AmoledBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
                             text = "Initializing agent harness and environment...",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = AmoledTextMuted,
                             modifier = Modifier.padding(16.dp)
                         )
                     }
@@ -261,17 +414,26 @@ fun TaskDetailScreen(
             }
 
             item {
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(40.dp))
             }
         }
+    }
+
+    // Full in-app preview and download modal dialog
+    viewingArtifact?.let { art ->
+        ArtifactViewerDialog(
+            artifact = art,
+            onDismiss = { viewingArtifact = null }
+        )
     }
 }
 
 @Composable
 private fun PlanStepRow(step: PlanStep) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = AragonSurfaceVariant),
+        colors = CardDefaults.cardColors(containerColor = AmoledCard),
         shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, AmoledBorder),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -281,17 +443,17 @@ private fun PlanStepRow(step: PlanStep) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             val (iconColor, iconVector) = when (step.status) {
-                StepStatus.COMPLETED -> Pair(AragonSuccess, Icons.Default.CheckCircle)
-                StepStatus.RUNNING -> Pair(MaterialTheme.colorScheme.primary, Icons.Default.PlayArrow)
-                StepStatus.FAILED -> Pair(MaterialTheme.colorScheme.error, Icons.Default.Error)
-                else -> Pair(MaterialTheme.colorScheme.onSurfaceVariant, Icons.Default.Check)
+                StepStatus.COMPLETED -> Pair(AmoledSuccess, Icons.Default.CheckCircle)
+                StepStatus.RUNNING, StepStatus.IN_PROGRESS -> Pair(AmoledAccent, Icons.Default.PlayArrow)
+                StepStatus.FAILED -> Pair(AmoledError, Icons.Default.Error)
+                else -> Pair(AmoledTextMuted, Icons.Default.Check)
             }
 
             Icon(
                 imageVector = iconVector,
                 contentDescription = null,
                 tint = iconColor,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(18.dp)
             )
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -300,14 +462,14 @@ private fun PlanStepRow(step: PlanStep) {
                 Text(
                     text = "Step ${step.stepNumber}: ${step.title}",
                     style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    fontWeight = FontWeight.SemiBold,
+                    color = AmoledTextPrimary
                 )
                 if (step.description.isNotBlank()) {
                     Text(
                         text = step.description,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AmoledTextSecondary
                     )
                 }
             }
@@ -320,29 +482,31 @@ private fun TimelineEventCard(event: TimelineEvent) {
     var isExpanded by remember { mutableStateOf(false) }
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = AragonSurface),
-        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = AmoledCard),
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, AmoledBorder),
         modifier = Modifier
             .fillMaxWidth()
             .clickable { isExpanded = !isExpanded }
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val dotColor = when (event.type) {
-                    TimelineEventType.PLANNING -> MaterialTheme.colorScheme.secondary
-                    TimelineEventType.TOOL_EXECUTION -> MaterialTheme.colorScheme.primary
-                    TimelineEventType.OBSERVATION -> AragonSuccess
-                    TimelineEventType.VERIFICATION -> AragonSuccess
-                    TimelineEventType.ERROR -> MaterialTheme.colorScheme.error
-                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    TimelineEventType.PLANNING -> AmoledWarning
+                    TimelineEventType.TOOL_EXECUTION -> AmoledAccent
+                    TimelineEventType.OBSERVATION -> AmoledSuccess
+                    TimelineEventType.VERIFICATION -> AmoledSuccess
+                    TimelineEventType.ERROR -> AmoledError
+                    TimelineEventType.ARTIFACT_GENERATION -> AmoledTextPrimary
+                    else -> AmoledTextSecondary
                 }
 
                 Box(
                     modifier = Modifier
-                        .size(10.dp)
+                        .size(8.dp)
                         .clip(CircleShape)
                         .background(dotColor)
                 )
@@ -352,14 +516,16 @@ private fun TimelineEventCard(event: TimelineEvent) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = event.title,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = AmoledTextPrimary
                     )
                     Text(
                         text = event.type.name,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        color = AmoledTextMuted
                     )
                 }
 
@@ -367,27 +533,29 @@ private fun TimelineEventCard(event: TimelineEvent) {
                     Icon(
                         imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
                         contentDescription = "Expand",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = AmoledTextMuted,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
 
             AnimatedVisibility(visible = isExpanded && event.details.isNotBlank()) {
                 Column(modifier = Modifier.padding(top = 10.dp)) {
-                    Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                    Divider(color = AmoledBorder, thickness = 0.5.dp)
                     Spacer(modifier = Modifier.height(8.dp))
                     Surface(
-                        color = AragonSurfaceVariant,
-                        shape = RoundedCornerShape(8.dp),
+                        color = AmoledElevated,
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(1.dp, AmoledBorder),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
                             text = event.details,
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(10.dp)
+                            fontSize = 11.sp,
+                            color = AmoledTextSecondary,
+                            modifier = Modifier.padding(8.dp)
                         )
                     }
                 }

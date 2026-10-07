@@ -34,6 +34,11 @@ class ArtifactManager(
     }
 
     suspend fun discoverArtifacts(taskId: String, resolver: WorkspacePathResolver): List<Artifact> = withContext(Dispatchers.IO) {
+        // Automatically sync any files created in OpenSandbox microVM into local workspace
+        runCatching {
+            com.example.aragon.AragonApplication.instance.openSandboxManager.syncSandboxToLocal(resolver)
+        }
+
         val detected = detector.scan(taskId, resolver)
         val result = mutableListOf<Artifact>()
 

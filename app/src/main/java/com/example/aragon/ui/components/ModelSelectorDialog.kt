@@ -1,6 +1,6 @@
 package com.example.aragon.ui.components
 
-import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,14 +28,21 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.aragon.domain.model.ModelInfo
-import com.example.ui.theme.AragonSurface
-import com.example.ui.theme.AragonSurfaceVariant
+import com.example.ui.theme.AmoledAccent
+import com.example.ui.theme.AmoledBg
+import com.example.ui.theme.AmoledBorder
+import com.example.ui.theme.AmoledCard
+import com.example.ui.theme.AmoledElevated
+import com.example.ui.theme.AmoledInteractive
+import com.example.ui.theme.AmoledTextMuted
+import com.example.ui.theme.AmoledTextPrimary
+import com.example.ui.theme.AmoledTextSecondary
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -48,18 +54,19 @@ fun ModelSelectorDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = AragonSurface,
+        containerColor = AmoledCard,
         title = {
             Column {
                 Text(
-                    text = "Select NVIDIA NIM Model",
+                    text = "Select Inference Model",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    color = AmoledTextPrimary
                 )
                 Text(
-                    text = "Choose model for autonomous decision-making",
+                    text = "NVIDIA NIM high-throughput reasoning & tool models",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = AmoledTextSecondary
                 )
             }
         },
@@ -67,15 +74,16 @@ fun ModelSelectorDialog(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(340.dp)
+                    .height(360.dp)
             ) {
                 items(models) { model ->
                     val isSelected = model.id == selectedModelId
                     Card(
                         colors = CardDefaults.cardColors(
-                            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else AragonSurfaceVariant
+                            containerColor = if (isSelected) AmoledInteractive else AmoledElevated
                         ),
                         shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, if (isSelected) AmoledTextPrimary else AmoledBorder),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 4.dp)
@@ -93,20 +101,22 @@ fun ModelSelectorDialog(
                                         text = model.name,
                                         style = MaterialTheme.typography.titleSmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                        color = AmoledTextPrimary
                                     )
                                     Text(
                                         text = "${model.publisher} • ${model.id}",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        color = AmoledTextSecondary
                                     )
                                 }
                                 if (isSelected) {
                                     Icon(
                                         imageVector = Icons.Default.Check,
                                         contentDescription = "Selected",
-                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                                        modifier = Modifier.size(20.dp)
+                                        tint = AmoledTextPrimary,
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
@@ -135,7 +145,7 @@ fun ModelSelectorDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("Close")
+                Text("Close", color = AmoledTextPrimary)
             }
         }
     )
@@ -144,14 +154,15 @@ fun ModelSelectorDialog(
 @Composable
 private fun BadgeChip(label: String) {
     Surface(
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
-        shape = RoundedCornerShape(4.dp)
+        color = AmoledCard,
+        shape = RoundedCornerShape(4.dp),
+        border = BorderStroke(0.5.dp, AmoledBorder)
     ) {
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
             fontSize = 10.sp,
-            color = MaterialTheme.colorScheme.primary,
+            color = AmoledTextSecondary,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
         )
     }

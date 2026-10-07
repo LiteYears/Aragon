@@ -229,5 +229,30 @@ class ToolRegistry {
                 permission = ToolPermission.SAFE
             )
         )
+
+        register(
+            ToolDefinition(
+                name = "sandbox_manage",
+                description = "Manage isolated OpenSandbox microVM/container instances (inspect health/status, spawn custom container image, or terminate).",
+                parameters = listOf(
+                    ToolParameter("action", "string", "Action to perform: 'status', 'spawn', 'terminate'", required = true),
+                    ToolParameter("image", "string", "Optional container image (e.g. 'opensandbox/python:3.12', 'ubuntu:22.04')", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "complete_task",
+                description = "Explicitly signal that all requested objectives, files, or analysis have been successfully created and completed.",
+                parameters = listOf(
+                    ToolParameter("summary", "string", "Summary of completed deliverables and achievements", required = true)
+                ),
+                permission = ToolPermission.SAFE
+            )
+        )
     }
 }
+
+

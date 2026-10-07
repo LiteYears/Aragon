@@ -1,5 +1,6 @@
 package com.example.aragon.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,14 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Speed
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -49,18 +43,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.aragon.domain.model.AgentMode
 import com.example.aragon.domain.model.Task
 import com.example.aragon.domain.model.TaskStatus
-import com.example.ui.theme.AragonObsidianBg
-import com.example.ui.theme.AragonSuccess
-import com.example.ui.theme.AragonSurface
-import com.example.ui.theme.AragonSurfaceVariant
+import com.example.ui.theme.AmoledAccent
+import com.example.ui.theme.AmoledBg
+import com.example.ui.theme.AmoledBorder
+import com.example.ui.theme.AmoledBorderActive
+import com.example.ui.theme.AmoledCard
+import com.example.ui.theme.AmoledElevated
+import com.example.ui.theme.AmoledError
+import com.example.ui.theme.AmoledInteractive
+import com.example.ui.theme.AmoledSuccess
+import com.example.ui.theme.AmoledTextMuted
+import com.example.ui.theme.AmoledTextPrimary
+import com.example.ui.theme.AmoledTextSecondary
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -78,7 +80,7 @@ fun HomeScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(AragonObsidianBg)
+            .background(AmoledBg)
             .padding(horizontal = 16.dp)
             .testTag("home_screen")
     ) {
@@ -88,41 +90,54 @@ fun HomeScreen(
                 .fillMaxWidth()
         ) {
             item {
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Hero Greeting Card
+                // Minimalist Hero Card
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = AragonSurface),
-                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = AmoledCard),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, AmoledBorder),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.AutoAwesome,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                color = AmoledInteractive,
+                                shape = RoundedCornerShape(6.dp),
+                                border = BorderStroke(1.dp, AmoledBorder),
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = AmoledTextPrimary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "Autonomous Computer Agent",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
+                                text = "AUTONOMOUS COMPUTER AGENT",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AmoledTextMuted,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
                             )
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "Aragon is ready.",
+                            text = "Aragon Runtime",
                             style = MaterialTheme.typography.headlineSmall,
                             fontWeight = FontWeight.ExtraBold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = AmoledTextPrimary
                         )
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Connected to local Linux container • Persistent workspace at /workspace",
+                            text = "Isolated Linux execution environment • OpenSandbox microVM backend • Deterministic verification",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = AmoledTextSecondary,
+                            lineHeight = 18.sp
                         )
                     }
                 }
@@ -134,8 +149,9 @@ fun HomeScreen(
             if (activeTask != null) {
                 item {
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = AmoledCard),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, AmoledAccent),
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onOpenTaskDetail(activeTask.id) }
@@ -144,34 +160,37 @@ fun HomeScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(16.dp),
+                                .padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
                                 modifier = Modifier
                                     .size(10.dp)
                                     .clip(CircleShape)
-                                    .background(AragonSuccess)
+                                    .background(AmoledSuccess)
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "ACTIVE TASK • ${activeTask.status}",
+                                    text = "ACTIVE SESSION • ${activeTask.status.name}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    fontFamily = FontFamily.Monospace,
+                                    color = AmoledAccent
                                 )
                                 Text(
                                     text = activeTask.title,
-                                    style = MaterialTheme.typography.titleMedium,
+                                    style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    color = AmoledTextPrimary,
+                                    maxLines = 1
                                 )
                             }
                             Icon(
                                 imageVector = Icons.Default.ArrowForward,
                                 contentDescription = "View",
-                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                tint = AmoledTextPrimary,
+                                modifier = Modifier.size(18.dp)
                             )
                         }
                     }
@@ -179,13 +198,13 @@ fun HomeScreen(
                 }
             }
 
-            // Quick Prompt / Benchmark Chips
+            // Quick Directives & Benchmarks
             item {
                 Text(
-                    text = "Quick Directives & Benchmarks",
+                    text = "Directives & Benchmarks",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = AmoledTextPrimary
                 )
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -194,14 +213,14 @@ fun HomeScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    QuickChip("📄 Create Verified DOCX Report") {
+                    QuickChip("📄 Verified DOCX Report") {
                         promptInput = "Create a verified DOCX administrative report with executive summary, tables, and system performance metrics."
                     }
-                    QuickChip("📝 Create hello.txt") {
+                    QuickChip("📝 hello.txt File") {
                         promptInput = "Create hello.txt containing Hello Aragon in /workspace."
                     }
-                    QuickChip("🌐 Generate Local Web App") {
-                        promptInput = "Build a local responsive web application project inside /workspace/webapp with HTML, CSS, and JavaScript."
+                    QuickChip("📦 OpenSandbox Integration Test") {
+                        promptInput = "Test OpenSandbox container runtime, execute Python script in sandbox, and generate report."
                     }
                     QuickChip("⚡ Run 7-Step Tool Benchmark") {
                         onRunBenchmark()
@@ -215,17 +234,17 @@ fun HomeScreen(
             if (recentTasks.isNotEmpty()) {
                 item {
                     Text(
-                        text = "Recent Task History",
+                        text = "Recent Sessions",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = AmoledTextPrimary
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                 }
 
                 items(recentTasks.take(5)) { task ->
                     TaskSummaryRow(task = task, onClick = { onOpenTaskDetail(task.id) })
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
 
                 item {
@@ -234,13 +253,16 @@ fun HomeScreen(
             }
         }
 
-        // Bottom Large Composer
+        // Bottom Minimalist Composer
         Surface(
-            color = AragonSurface,
-            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-            modifier = Modifier.fillMaxWidth()
+            color = AmoledCard,
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, AmoledBorder),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 10.dp)
         ) {
-            Column(modifier = Modifier.padding(14.dp)) {
+            Column(modifier = Modifier.padding(12.dp)) {
                 // Mode Toggle Row (Agent / Plan / Chat)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -249,31 +271,43 @@ fun HomeScreen(
                     FilterChip(
                         selected = selectedMode == AgentMode.AGENT,
                         onClick = { selectedMode = AgentMode.AGENT },
-                        label = { Text("Agent (Autonomous)") },
+                        label = { Text("Autonomous", fontSize = 11.sp) },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            selectedContainerColor = AmoledInteractive,
+                            selectedLabelColor = AmoledTextPrimary,
+                            containerColor = AmoledBg,
+                            labelColor = AmoledTextSecondary
                         ),
+                        border = BorderStroke(1.dp, if (selectedMode == AgentMode.AGENT) AmoledTextPrimary else AmoledBorder),
+                        shape = RoundedCornerShape(6.dp),
                         modifier = Modifier.testTag("mode_chip_agent")
                     )
                     FilterChip(
                         selected = selectedMode == AgentMode.PLAN,
                         onClick = { selectedMode = AgentMode.PLAN },
-                        label = { Text("Plan (Review First)") },
+                        label = { Text("Plan First", fontSize = 11.sp) },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            selectedContainerColor = AmoledInteractive,
+                            selectedLabelColor = AmoledTextPrimary,
+                            containerColor = AmoledBg,
+                            labelColor = AmoledTextSecondary
                         ),
+                        border = BorderStroke(1.dp, if (selectedMode == AgentMode.PLAN) AmoledTextPrimary else AmoledBorder),
+                        shape = RoundedCornerShape(6.dp),
                         modifier = Modifier.testTag("mode_chip_plan")
                     )
                     FilterChip(
                         selected = selectedMode == AgentMode.CHAT,
                         onClick = { selectedMode = AgentMode.CHAT },
-                        label = { Text("Chat") },
+                        label = { Text("Chat", fontSize = 11.sp) },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            selectedContainerColor = AmoledInteractive,
+                            selectedLabelColor = AmoledTextPrimary,
+                            containerColor = AmoledBg,
+                            labelColor = AmoledTextSecondary
                         ),
+                        border = BorderStroke(1.dp, if (selectedMode == AgentMode.CHAT) AmoledTextPrimary else AmoledBorder),
+                        shape = RoundedCornerShape(6.dp),
                         modifier = Modifier.testTag("mode_chip_chat")
                     )
                 }
@@ -288,14 +322,16 @@ fun HomeScreen(
                     OutlinedTextField(
                         value = promptInput,
                         onValueChange = { promptInput = it },
-                        placeholder = { Text("What can I do for you?", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        placeholder = { Text("What objective should Aragon execute?", color = AmoledTextMuted, fontSize = 13.sp) },
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                            focusedContainerColor = AragonSurfaceVariant,
-                            unfocusedContainerColor = AragonSurfaceVariant
+                            focusedBorderColor = AmoledTextPrimary,
+                            unfocusedBorderColor = AmoledBorder,
+                            focusedContainerColor = AmoledElevated,
+                            unfocusedContainerColor = AmoledElevated,
+                            focusedTextColor = AmoledTextPrimary,
+                            unfocusedTextColor = AmoledTextPrimary
                         ),
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .weight(1f)
                             .testTag("composer_input")
@@ -312,17 +348,18 @@ fun HomeScreen(
                         },
                         enabled = promptInput.isNotBlank(),
                         modifier = Modifier
-                            .size(48.dp)
+                            .size(44.dp)
                             .clip(CircleShape)
                             .background(
-                                if (promptInput.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                                if (promptInput.isNotBlank()) AmoledTextPrimary else AmoledInteractive
                             )
                             .testTag("send_task_btn")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Send,
                             contentDescription = "Send",
-                            tint = if (promptInput.isNotBlank()) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = if (promptInput.isNotBlank()) AmoledBg else AmoledTextMuted,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -334,15 +371,17 @@ fun HomeScreen(
 @Composable
 private fun QuickChip(text: String, onClick: () -> Unit) {
     Surface(
-        color = AragonSurfaceVariant,
+        color = AmoledCard,
         shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, AmoledBorder),
         modifier = Modifier.clickable(onClick = onClick)
     ) {
         Text(
             text = text,
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = AmoledTextPrimary,
+            fontSize = 12.sp,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
         )
     }
@@ -351,8 +390,9 @@ private fun QuickChip(text: String, onClick: () -> Unit) {
 @Composable
 private fun TaskSummaryRow(task: Task, onClick: () -> Unit) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = AragonSurfaceVariant),
+        colors = CardDefaults.cardColors(containerColor = AmoledCard),
         shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, AmoledBorder),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
@@ -364,10 +404,10 @@ private fun TaskSummaryRow(task: Task, onClick: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             val statusColor = when (task.status) {
-                TaskStatus.COMPLETED -> AragonSuccess
-                TaskStatus.EXECUTING, TaskStatus.PLANNING -> MaterialTheme.colorScheme.primary
-                TaskStatus.FAILED -> MaterialTheme.colorScheme.error
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                TaskStatus.COMPLETED -> AmoledSuccess
+                TaskStatus.EXECUTING, TaskStatus.PLANNING -> AmoledAccent
+                TaskStatus.FAILED -> AmoledError
+                else -> AmoledTextMuted
             }
 
             Box(
@@ -383,20 +423,22 @@ private fun TaskSummaryRow(task: Task, onClick: () -> Unit) {
                 Text(
                     text = task.title,
                     style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    fontWeight = FontWeight.SemiBold,
+                    color = AmoledTextPrimary,
+                    maxLines = 1
                 )
                 Text(
-                    text = "${task.status} • Iteration ${task.iteration}",
+                    text = "${task.status.name} • Iteration ${task.iteration} • ${task.selectedModel.substringAfter("/")}",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    fontFamily = FontFamily.Monospace,
+                    color = AmoledTextSecondary
                 )
             }
 
             Icon(
                 imageVector = Icons.Default.ArrowForward,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = AmoledTextMuted,
                 modifier = Modifier.size(16.dp)
             )
         }

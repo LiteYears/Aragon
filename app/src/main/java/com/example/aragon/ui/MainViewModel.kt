@@ -35,6 +35,7 @@ class MainViewModel : ViewModel() {
     private val ubuntuManager = app.ubuntuManager
     private val modelRegistry = app.modelRegistry
     private val nimProvider = app.nimProvider
+    private val openSandboxManager = app.openSandboxManager
 
     val allTasks: StateFlow<List<Task>> = taskRepo.getAllTasks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -77,8 +78,18 @@ class MainViewModel : ViewModel() {
     val maxIterations: StateFlow<Int> = preferences.maxIterations
     val temperature: StateFlow<Float> = preferences.temperature
 
+    // OpenSandbox State Flows
+    val executionBackend: StateFlow<com.example.aragon.domain.model.ExecutionBackend> = preferences.executionBackend
+    val openSandboxServerUrl: StateFlow<String> = preferences.openSandboxServerUrl
+    val openSandboxApiKey: StateFlow<String> = preferences.openSandboxApiKey
+    val openSandboxImage: StateFlow<String> = preferences.openSandboxImage
+    val openSandboxActiveId: StateFlow<String?> = preferences.openSandboxActiveId
+    val activeSandbox: StateFlow<com.example.aragon.opensandbox.OpenSandboxInstance?> = openSandboxManager.activeSandbox
+    val openSandboxHealth: StateFlow<com.example.aragon.opensandbox.OpenSandboxHealth?> = openSandboxManager.lastHealth
+
     private val _ubuntuReport = MutableStateFlow<UbuntuHealthReport?>(null)
     val ubuntuReport: StateFlow<UbuntuHealthReport?> = _ubuntuReport.asStateFlow()
+
 
     init {
         refreshHealthReport()
@@ -188,6 +199,34 @@ class MainViewModel : ViewModel() {
         preferences.setTemperature(temp)
     }
 
+    fun setExecutionBackend(backend: com.example.aragon.domain.model.ExecutionBackend) {
+        preferences.setExecutionBackend(backend)
+        refreshHealthReport()
+    }
+
+    fun saveOpenSandboxSettings(url: String, apiKey: String, image: String) {
+        preferences.setOpenSandboxServerUrl(url)
+        preferences.setOpenSandboxApiKey(apiKey)
+        preferences.setOpenSandboxImage(image)
+        refreshHealthReport()
+    }
+
+    suspend fun testOpenSandboxConnection(url: String, apiKey: String): Result<String> {
+        return openSandboxManager.testConnection(url, apiKey)
+    }
+
+    suspend fun spawnOpenSandbox(customImage: String? = null): Result<com.example.aragon.opensandbox.OpenSandboxInstance> {
+        val result = openSandboxManager.spawnSandbox(customImage)
+        refreshHealthReport()
+        return result
+    }
+
+    suspend fun terminateOpenSandbox(): Result<Boolean> {
+        val result = openSandboxManager.terminateSandbox()
+        refreshHealthReport()
+        return result
+    }
+
     fun runBenchmarkSuite() {
         viewModelScope.launch {
             // Launch Test 3: Verified DOCX administrative report
@@ -198,3 +237,4 @@ class MainViewModel : ViewModel() {
         }
     }
 }
+

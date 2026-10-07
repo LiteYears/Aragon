@@ -15,10 +15,14 @@ data class ProcessExecutionResult(
     val durationMs: Long,
     val workingDirectory: String,
     val timedOut: Boolean = false,
-    val cancelled: Boolean = false
+    val cancelled: Boolean = false,
+    val isSandbox: Boolean = false
 )
 
-class ProcessManager {
+class ProcessManager(
+    private val openSandboxManagerProvider: (() -> com.example.aragon.opensandbox.OpenSandboxManager?)? = null,
+    private val executionBackendProvider: (() -> com.example.aragon.domain.model.ExecutionBackend)? = null
+) {
 
     suspend fun execute(
         command: String,
@@ -29,6 +33,22 @@ class ProcessManager {
         val startTime = System.currentTimeMillis()
         if (!workingDir.exists()) {
             workingDir.mkdirs()
+        }
+
+        // If OpenSandbox is selected as execution backend, route to OpenSandbox container
+        if (executionBackendProvider?.invoke() == com.example.aragon.domain.model.ExecutionBackend.OPEN_SANDBOX) {
+            val sandboxManager = openSandboxManagerProvider?.invoke()
+            if (sandboxManager != null) {
+                val sbResult = sandboxManager.executeCommand(command, workingDir.absolutePath, timeoutMs)
+                return@withContext ProcessExecutionResult(
+                    exitCode = sbResult.exitCode,
+                    stdout = sbResult.stdout,
+                    stderr = sbResult.stderr,
+                    durationMs = sbResult.durationMs,
+                    workingDirectory = workingDir.absolutePath,
+                    isSandbox = true
+                )
+            }
         }
 
         // Try direct Process execution first
@@ -43,6 +63,7 @@ class ProcessManager {
         // Fallback to built-in POSIX command interpreter if system process cannot execute
         executeBuiltinCommand(command, workingDir, startTime)
     }
+
 
     private fun executeViaSystemProcess(
         command: String,

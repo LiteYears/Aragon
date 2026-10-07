@@ -5,11 +5,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
+
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -18,6 +19,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,11 +70,17 @@ fun MainScreen(viewModel: MainViewModel) {
     val maxIterations by viewModel.maxIterations.collectAsStateWithLifecycle()
     val temperature by viewModel.temperature.collectAsStateWithLifecycle()
     val ubuntuReport by viewModel.ubuntuReport.collectAsStateWithLifecycle()
+    val executionBackend by viewModel.executionBackend.collectAsStateWithLifecycle()
+    val openSandboxServerUrl by viewModel.openSandboxServerUrl.collectAsStateWithLifecycle()
+    val openSandboxApiKey by viewModel.openSandboxApiKey.collectAsStateWithLifecycle()
+    val openSandboxImage by viewModel.openSandboxImage.collectAsStateWithLifecycle()
+    val openSandboxActiveId by viewModel.openSandboxActiveId.collectAsStateWithLifecycle()
 
     val activeTask = allTasks.find { it.status.isActive }
 
     // If viewing a specific task detail:
     if (selectedTaskId != null) {
+
         BackHandler {
             viewModel.selectTask(null)
         }
@@ -100,28 +108,34 @@ fun MainScreen(viewModel: MainViewModel) {
         },
         bottomBar = {
             NavigationBar(
-                containerColor = AragonSurface,
+                containerColor = com.example.ui.theme.AmoledBg,
                 modifier = Modifier.testTag("bottom_nav_bar")
             ) {
                 NavigationBarItem(
                     selected = currentTab == AragonTab.HOME,
                     onClick = { currentTab = AragonTab.HOME },
                     icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
-                    label = { Text("Home") },
+                    label = { Text("Home", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                        selectedIconColor = com.example.ui.theme.AmoledTextPrimary,
+                        selectedTextColor = com.example.ui.theme.AmoledTextPrimary,
+                        unselectedIconColor = com.example.ui.theme.AmoledTextMuted,
+                        unselectedTextColor = com.example.ui.theme.AmoledTextMuted,
+                        indicatorColor = com.example.ui.theme.AmoledInteractive
                     ),
                     modifier = Modifier.testTag("nav_item_home")
                 )
                 NavigationBarItem(
                     selected = currentTab == AragonTab.TASKS,
                     onClick = { currentTab = AragonTab.TASKS },
-                    icon = { Icon(Icons.Default.List, contentDescription = "Tasks") },
-                    label = { Text("Tasks") },
+                    icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Tasks") },
+                    label = { Text("Tasks", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                        selectedIconColor = com.example.ui.theme.AmoledTextPrimary,
+                        selectedTextColor = com.example.ui.theme.AmoledTextPrimary,
+                        unselectedIconColor = com.example.ui.theme.AmoledTextMuted,
+                        unselectedTextColor = com.example.ui.theme.AmoledTextMuted,
+                        indicatorColor = com.example.ui.theme.AmoledInteractive
                     ),
                     modifier = Modifier.testTag("nav_item_tasks")
                 )
@@ -129,10 +143,13 @@ fun MainScreen(viewModel: MainViewModel) {
                     selected = currentTab == AragonTab.PROJECTS,
                     onClick = { currentTab = AragonTab.PROJECTS },
                     icon = { Icon(Icons.Default.Folder, contentDescription = "Projects") },
-                    label = { Text("Projects") },
+                    label = { Text("Projects", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                        selectedIconColor = com.example.ui.theme.AmoledTextPrimary,
+                        selectedTextColor = com.example.ui.theme.AmoledTextPrimary,
+                        unselectedIconColor = com.example.ui.theme.AmoledTextMuted,
+                        unselectedTextColor = com.example.ui.theme.AmoledTextMuted,
+                        indicatorColor = com.example.ui.theme.AmoledInteractive
                     ),
                     modifier = Modifier.testTag("nav_item_projects")
                 )
@@ -140,10 +157,13 @@ fun MainScreen(viewModel: MainViewModel) {
                     selected = currentTab == AragonTab.ARTIFACTS,
                     onClick = { currentTab = AragonTab.ARTIFACTS },
                     icon = { Icon(Icons.Default.Description, contentDescription = "Artifacts") },
-                    label = { Text("Artifacts") },
+                    label = { Text("Artifacts", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                        selectedIconColor = com.example.ui.theme.AmoledTextPrimary,
+                        selectedTextColor = com.example.ui.theme.AmoledTextPrimary,
+                        unselectedIconColor = com.example.ui.theme.AmoledTextMuted,
+                        unselectedTextColor = com.example.ui.theme.AmoledTextMuted,
+                        indicatorColor = com.example.ui.theme.AmoledInteractive
                     ),
                     modifier = Modifier.testTag("nav_item_artifacts")
                 )
@@ -151,16 +171,19 @@ fun MainScreen(viewModel: MainViewModel) {
                     selected = currentTab == AragonTab.SETTINGS,
                     onClick = { currentTab = AragonTab.SETTINGS },
                     icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
-                    label = { Text("Settings") },
+                    label = { Text("Settings", fontSize = 11.sp) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                        indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                        selectedIconColor = com.example.ui.theme.AmoledTextPrimary,
+                        selectedTextColor = com.example.ui.theme.AmoledTextPrimary,
+                        unselectedIconColor = com.example.ui.theme.AmoledTextMuted,
+                        unselectedTextColor = com.example.ui.theme.AmoledTextMuted,
+                        indicatorColor = com.example.ui.theme.AmoledInteractive
                     ),
                     modifier = Modifier.testTag("nav_item_settings")
                 )
             }
         },
-        containerColor = AragonObsidianBg
+        containerColor = com.example.ui.theme.AmoledBg
     ) { innerPadding ->
         Box(
             modifier = Modifier
@@ -207,6 +230,11 @@ fun MainScreen(viewModel: MainViewModel) {
                     autonomyLevel = autonomyLevel,
                     maxIterations = maxIterations,
                     temperature = temperature,
+                    executionBackend = executionBackend,
+                    openSandboxServerUrl = openSandboxServerUrl,
+                    openSandboxApiKey = openSandboxApiKey,
+                    openSandboxImage = openSandboxImage,
+                    openSandboxActiveId = openSandboxActiveId,
                     onSaveApiKey = { viewModel.saveApiKey(it) },
                     onSaveEndpoint = { viewModel.saveEndpoint(it) },
                     onTestConnection = { testKey, testEndpoint ->
@@ -216,9 +244,15 @@ fun MainScreen(viewModel: MainViewModel) {
                     onSaveAutonomyLevel = { viewModel.saveAutonomyLevel(it) },
                     onSaveMaxIterations = { viewModel.saveMaxIterations(it) },
                     onSaveTemperature = { viewModel.saveTemperature(it) },
+                    onSetExecutionBackend = { viewModel.setExecutionBackend(it) },
+                    onSaveOpenSandboxSettings = { url, key, img -> viewModel.saveOpenSandboxSettings(url, key, img) },
+                    onTestOpenSandboxConnection = { url, key -> viewModel.testOpenSandboxConnection(url, key) },
+                    onSpawnOpenSandbox = { img -> viewModel.spawnOpenSandbox(img) },
+                    onTerminateOpenSandbox = { viewModel.terminateOpenSandbox() },
                     onRunBenchmark = { viewModel.runBenchmarkSuite() },
                     onRunHealthCheck = { viewModel.refreshHealthReport() }
                 )
+
             }
         }
     }

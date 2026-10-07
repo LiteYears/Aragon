@@ -22,7 +22,9 @@ class ToolExecutor(
         .build(),
     private val textEditorTool: TextEditorTool = TextEditorTool(),
     private val browserSession: com.example.aragon.computer.BrowserSession = com.example.aragon.computer.BrowserSession(okHttpClient),
-    private val verificationEngine: com.example.aragon.agent.VerificationEngine = com.example.aragon.agent.VerificationEngine()
+    private val verificationEngine: com.example.aragon.agent.VerificationEngine = com.example.aragon.agent.VerificationEngine(),
+    private val openSandboxManager: com.example.aragon.opensandbox.OpenSandboxManager? = null,
+    private val preferencesManager: com.example.aragon.data.preferences.PreferencesManager? = null
 ) {
 
     suspend fun executeTool(
@@ -54,6 +56,8 @@ class ToolExecutor(
                 "web_search" -> executeWebSearch(callId, taskId, args, resolver, startTime)
                 "web_fetch" -> executeWebFetch(callId, taskId, args, resolver, startTime)
                 "artifact_inspect" -> executeArtifactInspect(callId, taskId, args, resolver, startTime)
+                "sandbox_manage" -> executeSandboxManage(callId, taskId, args, resolver, startTime)
+
                 else -> ToolResult(
                     callId = callId,
                     taskId = taskId,
@@ -890,9 +894,113 @@ class ToolExecutor(
         )
     }
 
+    private suspend fun executeSandboxManage(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver,
+        startTime: Long
+    ): ToolResult {
+        val action = args.optString("action", "status").lowercase()
+        val customImage = args.optString("image", "").takeIf { it.isNotBlank() }
+
+        if (openSandboxManager == null) {
+            return ToolResult(
+                callId = callId,
+                taskId = taskId,
+                success = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "OpenSandbox manager is not initialized",
+                durationMs = System.currentTimeMillis() - startTime,
+                workingDirectory = "/workspace"
+            )
+        }
+
+        return when (action) {
+            "status", "health" -> {
+                val health = openSandboxManager.checkHealth()
+                val active = openSandboxManager.activeSandbox.value
+                val output = buildString {
+                    appendLine("OpenSandbox Runtime Status:")
+                    appendLine("• Available: ${health.isAvailable}")
+                    appendLine("• Live Server: ${health.isLiveServer}")
+                    appendLine("• Server URL: ${health.serverUrl}")
+                    appendLine("• Active Sandbox ID: ${active?.id ?: "None (will auto-spawn on demand)"}")
+                    appendLine("• Active Image: ${active?.image ?: health.activeImage}")
+                    appendLine("• Latency: ${health.latencyMs} ms")
+                    appendLine("• Status: ${health.statusMessage}")
+                }
+                ToolResult(
+                    callId = callId,
+                    taskId = taskId,
+                    success = true,
+                    exitCode = 0,
+                    stdout = output.trim(),
+                    stderr = "",
+                    durationMs = System.currentTimeMillis() - startTime,
+                    workingDirectory = "/workspace"
+                )
+            }
+            "spawn", "create" -> {
+                val res = openSandboxManager.spawnSandbox(customImage)
+                if (res.isSuccess) {
+                    val sb = res.getOrThrow()
+                    ToolResult(
+                        callId = callId,
+                        taskId = taskId,
+                        success = true,
+                        exitCode = 0,
+                        stdout = "Successfully spawned OpenSandbox instance: ${sb.id} with image ${sb.image}",
+                        stderr = "",
+                        durationMs = System.currentTimeMillis() - startTime,
+                        workingDirectory = "/workspace"
+                    )
+                } else {
+                    ToolResult(
+                        callId = callId,
+                        taskId = taskId,
+                        success = false,
+                        exitCode = 1,
+                        stdout = "",
+                        stderr = "Failed to spawn OpenSandbox: ${res.exceptionOrNull()?.message}",
+                        durationMs = System.currentTimeMillis() - startTime,
+                        workingDirectory = "/workspace"
+                    )
+                }
+            }
+            "terminate", "delete", "stop" -> {
+                val res = openSandboxManager.terminateSandbox()
+                ToolResult(
+                    callId = callId,
+                    taskId = taskId,
+                    success = res.getOrDefault(true),
+                    exitCode = 0,
+                    stdout = "OpenSandbox instance terminated successfully.",
+                    stderr = "",
+                    durationMs = System.currentTimeMillis() - startTime,
+                    workingDirectory = "/workspace"
+                )
+            }
+            else -> {
+                ToolResult(
+                    callId = callId,
+                    taskId = taskId,
+                    success = false,
+                    exitCode = 1,
+                    stdout = "",
+                    stderr = "Unknown sandbox_manage action: '$action'. Supported: status, spawn, terminate",
+                    durationMs = System.currentTimeMillis() - startTime,
+                    workingDirectory = "/workspace"
+                )
+            }
+        }
+    }
+
     private fun computeSha256(bytes: ByteArray): String {
         val md = MessageDigest.getInstance("SHA-256")
         val digest = md.digest(bytes)
         return digest.joinToString("") { "%02x".format(it) }
     }
 }
+

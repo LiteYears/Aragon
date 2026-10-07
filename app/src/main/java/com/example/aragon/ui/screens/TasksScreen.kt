@@ -1,5 +1,6 @@
 package com.example.aragon.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -41,14 +42,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.aragon.domain.model.Task
 import com.example.aragon.domain.model.TaskStatus
-import com.example.ui.theme.AragonObsidianBg
-import com.example.ui.theme.AragonSuccess
-import com.example.ui.theme.AragonSurface
-import com.example.ui.theme.AragonSurfaceVariant
+import com.example.ui.theme.AmoledAccent
+import com.example.ui.theme.AmoledBg
+import com.example.ui.theme.AmoledBorder
+import com.example.ui.theme.AmoledCard
+import com.example.ui.theme.AmoledError
+import com.example.ui.theme.AmoledInteractive
+import com.example.ui.theme.AmoledSuccess
+import com.example.ui.theme.AmoledTextMuted
+import com.example.ui.theme.AmoledTextPrimary
+import com.example.ui.theme.AmoledTextSecondary
+import com.example.ui.theme.AmoledWarning
 
 @Composable
 fun TasksScreen(
@@ -70,14 +80,15 @@ fun TasksScreen(
         floatingActionButton = {
             FloatingActionButton(
                 onClick = onNewTask,
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
+                containerColor = AmoledTextPrimary,
+                contentColor = AmoledBg,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.testTag("new_task_fab")
             ) {
                 Icon(Icons.Default.Add, contentDescription = "New Task")
             }
         },
-        containerColor = AragonObsidianBg
+        containerColor = AmoledBg
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -86,40 +97,71 @@ fun TasksScreen(
                 .padding(horizontal = 16.dp)
                 .testTag("tasks_screen")
         ) {
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Filter Chips
+            Text(
+                text = "Autonomous Sessions",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.ExtraBold,
+                color = AmoledTextPrimary
+            )
+            Text(
+                text = "Complete history of tasks, tool execution steps, and verification checkpoints.",
+                style = MaterialTheme.typography.bodySmall,
+                color = AmoledTextSecondary
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Minimalist Filter Chips
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                listOf("ALL" to "All", "ACTIVE" to "Active", "COMPLETED" to "Completed", "FAILED" to "Failed").forEach { (key, label) ->
+                listOf(
+                    "ALL" to "All (${tasks.size})",
+                    "ACTIVE" to "Active (${tasks.count { it.status.isActive }})",
+                    "COMPLETED" to "Completed (${tasks.count { it.status == TaskStatus.COMPLETED }})",
+                    "FAILED" to "Failed (${tasks.count { it.status == TaskStatus.FAILED }})"
+                ).forEach { (key, label) ->
                     FilterChip(
                         selected = selectedFilter == key,
                         onClick = { selectedFilter = key },
-                        label = { Text(label) },
+                        label = { Text(label, fontSize = 12.sp) },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
+                            selectedContainerColor = AmoledInteractive,
+                            selectedLabelColor = AmoledTextPrimary,
+                            containerColor = AmoledCard,
+                            labelColor = AmoledTextSecondary
+                        ),
+                        border = BorderStroke(1.dp, if (selectedFilter == key) AmoledTextPrimary else AmoledBorder),
+                        shape = RoundedCornerShape(8.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             if (filteredTasks.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(top = 60.dp),
+                        .padding(top = 80.dp),
                     contentAlignment = Alignment.TopCenter
                 ) {
-                    Text(
-                        text = "No tasks found in this view.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Surface(
+                        color = AmoledCard,
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, AmoledBorder),
+                        modifier = Modifier.fillMaxWidth(0.9f)
+                    ) {
+                        Text(
+                            text = "No sessions match the selected filter.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AmoledTextSecondary,
+                            modifier = Modifier.padding(20.dp)
+                        )
+                    }
                 }
             } else {
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -147,8 +189,9 @@ private fun TaskListItem(
     onDelete: () -> Unit
 ) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = AragonSurface),
+        colors = CardDefaults.cardColors(containerColor = AmoledCard),
         shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, AmoledBorder),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
@@ -161,16 +204,16 @@ private fun TaskListItem(
             verticalAlignment = Alignment.CenterVertically
         ) {
             val statusColor = when (task.status) {
-                TaskStatus.COMPLETED -> AragonSuccess
-                TaskStatus.EXECUTING, TaskStatus.PLANNING -> MaterialTheme.colorScheme.primary
-                TaskStatus.FAILED -> MaterialTheme.colorScheme.error
-                TaskStatus.WAITING_FOR_USER -> MaterialTheme.colorScheme.tertiary
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
+                TaskStatus.COMPLETED -> AmoledSuccess
+                TaskStatus.EXECUTING, TaskStatus.PLANNING, TaskStatus.OBSERVING -> AmoledAccent
+                TaskStatus.FAILED -> AmoledError
+                TaskStatus.WAITING_FOR_USER -> AmoledWarning
+                else -> AmoledTextMuted
             }
 
             Box(
                 modifier = Modifier
-                    .size(10.dp)
+                    .size(9.dp)
                     .clip(CircleShape)
                     .background(statusColor)
             )
@@ -181,13 +224,15 @@ private fun TaskListItem(
                 Text(
                     text = task.title,
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
+                    fontWeight = FontWeight.SemiBold,
+                    color = AmoledTextPrimary,
+                    maxLines = 1
                 )
                 Text(
-                    text = "${task.status} • Iteration ${task.iteration} • ${task.selectedModel.substringAfter("/")}",
+                    text = "${task.status.name} • Iteration ${task.iteration} • ${task.selectedModel.substringAfter("/")}",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    fontFamily = FontFamily.Monospace,
+                    color = AmoledTextSecondary
                 )
             }
 
@@ -195,7 +240,7 @@ private fun TaskListItem(
                 Icon(
                     imageVector = Icons.Default.Delete,
                     contentDescription = "Delete Task",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    tint = AmoledTextMuted,
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -203,8 +248,8 @@ private fun TaskListItem(
             Icon(
                 imageVector = Icons.Default.ArrowForward,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp)
+                tint = AmoledTextSecondary,
+                modifier = Modifier.size(16.dp)
             )
         }
     }

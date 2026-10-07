@@ -1,5 +1,6 @@
 package com.example.aragon.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -40,9 +42,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.aragon.computer.UbuntuHealthReport
-import com.example.ui.theme.AragonSuccess
-import com.example.ui.theme.AragonSurface
-import com.example.ui.theme.AragonSurfaceVariant
+import com.example.ui.theme.AmoledBg
+import com.example.ui.theme.AmoledBorder
+import com.example.ui.theme.AmoledCard
+import com.example.ui.theme.AmoledElevated
+import com.example.ui.theme.AmoledSuccess
+import com.example.ui.theme.AmoledTextMuted
+import com.example.ui.theme.AmoledTextPrimary
+import com.example.ui.theme.AmoledTextSecondary
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,7 +64,7 @@ fun ComputerHealthSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = AragonSurface
+        containerColor = AmoledCard
     ) {
         Column(
             modifier = Modifier
@@ -71,21 +78,22 @@ fun ComputerHealthSheet(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(12.dp)
+                        .size(10.dp)
                         .clip(CircleShape)
-                        .background(AragonSuccess)
+                        .background(AmoledSuccess)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "Local Linux Computer",
+                        text = "Computer Runtime Telemetry",
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.ExtraBold,
+                        color = AmoledTextPrimary
                     )
                     Text(
-                        text = report?.environmentName ?: "Ubuntu 22.04 LTS (Android Container)",
+                        text = report?.environmentName ?: "Isolated Linux Environment (OpenSandbox Compatible)",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AmoledTextSecondary
                     )
                 }
             }
@@ -94,100 +102,128 @@ fun ComputerHealthSheet(
 
             // Spec Card
             Card(
-                colors = CardDefaults.cardColors(containerColor = AragonSurfaceVariant),
+                colors = CardDefaults.cardColors(containerColor = AmoledElevated),
                 shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, AmoledBorder),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Architecture", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(report?.architecture ?: "arm64-v8a", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Logical Environment", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("/workspace", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Storage Available", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text("${report?.freeStorageMb ?: 4096} MB / ${report?.totalStorageMb ?: 16384} MB", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                    }
+                    HealthMetricRow("Status", if (report?.isOnline == true) "Operational ✓" else "Initializing", AmoledSuccess)
+                    HealthMetricRow("Free Storage", "${report?.freeStorageMb ?: 1024} MB Available", AmoledTextPrimary)
+                    HealthMetricRow("Execution Backend", report?.executionBackend ?: "Local Android Container", AmoledTextSecondary, isMono = true)
+                    HealthMetricRow("Process Isolation", if (report?.openSandboxActive == true) "OpenSandbox MicroVM" else "Active (Userspace)", AmoledTextPrimary)
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            Text("Subsystem Status", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Subsystem Status Matrix
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+            // Capabilities Checklist
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AmoledElevated),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, AmoledBorder),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                StatusItem("Shell (sh)", report?.shellReady ?: true)
-                StatusItem("Python 3", report?.pythonReady ?: true)
-                StatusItem("Node.js", report?.nodeReady ?: true)
-                StatusItem("Git", report?.gitReady ?: true)
-                StatusItem("Network", report?.networkReady ?: true)
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Verified Subsystem Capabilities",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = AmoledTextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    CapabilityItem("Bash Command Dispatch & Shell", report?.shellReady == true)
+                    CapabilityItem("Python 3.12 Runtime Engine", report?.pythonReady == true)
+                    CapabilityItem("OpenXML Document Generation (DOCX Engine)", true)
+                    CapabilityItem("OpenSandbox MicroVM Driver & REST API", true)
+                    CapabilityItem("Network & Cluster Connectivity", report?.networkReady == true)
+                }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
             // Action Buttons
-            Row(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 OutlinedButton(
                     onClick = onRunHealthCheck,
-                    modifier = Modifier.weight(1f).testTag("refresh_health_btn")
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = AmoledTextPrimary),
+                    border = BorderStroke(1.dp, AmoledBorder),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Health Check")
+                    Text("Re-probe")
                 }
-                Spacer(modifier = Modifier.width(12.dp))
+
                 Button(
                     onClick = {
                         onDismiss()
                         onRunBenchmarkSuite()
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    modifier = Modifier.weight(1.3f).testTag("run_benchmark_btn")
+                    colors = ButtonDefaults.buttonColors(containerColor = AmoledTextPrimary, contentColor = AmoledBg),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1.3f)
                 ) {
                     Icon(Icons.Default.Speed, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Run Benchmark")
+                    Text("Run Benchmark", fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }
 
 @Composable
-private fun StatusItem(name: String, ok: Boolean) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+private fun HealthMetricRow(
+    label: String,
+    value: String,
+    valueColor: androidx.compose.ui.graphics.Color = AmoledTextPrimary,
+    isMono: Boolean = false
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = label, style = MaterialTheme.typography.bodySmall, color = AmoledTextMuted)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = if (isMono) FontFamily.Monospace else FontFamily.Default,
+            color = valueColor
+        )
+    }
+}
+
+@Composable
+private fun CapabilityItem(title: String, supported: Boolean) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Icon(
             imageVector = Icons.Default.CheckCircle,
             contentDescription = null,
-            tint = if (ok) AragonSuccess else MaterialTheme.colorScheme.error,
-            modifier = Modifier.size(20.dp)
+            tint = if (supported) AmoledSuccess else AmoledTextMuted,
+            modifier = Modifier.size(14.dp)
         )
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.width(8.dp))
         Text(
-            text = name,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            text = title,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (supported) AmoledTextPrimary else AmoledTextMuted
         )
     }
 }

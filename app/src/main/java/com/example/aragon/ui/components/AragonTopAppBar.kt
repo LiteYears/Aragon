@@ -1,5 +1,6 @@
 package com.example.aragon.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -25,13 +26,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.theme.AragonSuccess
-import com.example.ui.theme.AragonSurface
+import com.example.ui.theme.AmoledBg
+import com.example.ui.theme.AmoledBorder
+import com.example.ui.theme.AmoledCard
+import com.example.ui.theme.AmoledInteractive
+import com.example.ui.theme.AmoledSuccess
+import com.example.ui.theme.AmoledTextMuted
+import com.example.ui.theme.AmoledTextPrimary
+import com.example.ui.theme.AmoledTextSecondary
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,22 +49,22 @@ fun AragonTopAppBar(
 ) {
     TopAppBar(
         colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = AragonSurface
+            containerColor = AmoledBg
         ),
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Falcon Crest Logo Symbol
                 Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
+                    color = AmoledCard,
                     shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, AmoledBorder),
                     modifier = Modifier.size(32.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(
                             text = "A",
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            color = AmoledTextPrimary,
                             fontWeight = FontWeight.Black,
-                            fontSize = 18.sp
+                            fontSize = 17.sp
                         )
                     }
                 }
@@ -66,69 +73,81 @@ fun AragonTopAppBar(
                     Text(
                         text = "ARAGON",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.ExtraBold,
+                        fontWeight = FontWeight.Black,
                         letterSpacing = 1.2.sp,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = AmoledTextPrimary
                     )
                     Text(
-                        text = "Autonomous Computer Agent",
+                        text = "Autonomous Agent Runtime",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = AmoledTextMuted,
+                        fontSize = 10.sp
                     )
                 }
             }
         },
         actions = {
-            // Model Selector Chip
-            Row(
+            // Model Selector Pill
+            Surface(
+                color = AmoledCard,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, AmoledBorder),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clip(RoundedCornerShape(8.dp))
                     .clickable(onClick = onOpenModelSelector)
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                    .testTag("model_selector_chip"),
-                verticalAlignment = Alignment.CenterVertically
+                    .testTag("model_selector_chip")
             ) {
-                Icon(
-                    imageVector = Icons.Default.Tune,
-                    contentDescription = "Model",
-                    modifier = Modifier.size(14.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = selectedModel.substringAfter("/").take(14),
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = "Model",
+                        modifier = Modifier.size(13.dp),
+                        tint = AmoledTextPrimary
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = selectedModel.substringAfter("/").take(13),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = AmoledTextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
 
             // Computer Status Pill
-            Row(
+            Surface(
+                color = AmoledCard,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, AmoledBorder),
                 modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clip(RoundedCornerShape(8.dp))
                     .clickable(onClick = onOpenComputerStatus)
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-                    .testTag("computer_status_pill"),
-                verticalAlignment = Alignment.CenterVertically
+                    .testTag("computer_status_pill")
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(AragonSuccess)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Icon(
-                    imageVector = Icons.Default.Computer,
-                    contentDescription = "Computer Status",
-                    modifier = Modifier.size(14.dp),
-                    tint = AragonSuccess
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(AmoledSuccess)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Icon(
+                        imageVector = Icons.Default.Computer,
+                        contentDescription = "Computer Status",
+                        modifier = Modifier.size(14.dp),
+                        tint = AmoledSuccess
+                    )
+                }
             }
             Spacer(modifier = Modifier.width(8.dp))
         }

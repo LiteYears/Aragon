@@ -21,10 +21,20 @@ data class UbuntuHealthReport(
     val networkReady: Boolean,
     val freeStorageMb: Long,
     val totalStorageMb: Long,
-    val statusMessage: String
+    val statusMessage: String,
+    val executionBackend: String = "Local Android Container",
+    val openSandboxActive: Boolean = false,
+    val openSandboxId: String? = null,
+    val openSandboxImage: String? = null,
+    val openSandboxServerUrl: String? = null,
+    val openSandboxLatencyMs: Long? = null
 )
 
-class UbuntuManager(private val context: Context) {
+class UbuntuManager(
+    private val context: Context,
+    private val preferencesManager: com.example.aragon.data.preferences.PreferencesManager? = null,
+    private val openSandboxManager: com.example.aragon.opensandbox.OpenSandboxManager? = null
+) {
     private var cachedReport: UbuntuHealthReport? = null
 
     suspend fun getHealthReport(forceRefresh: Boolean = false): UbuntuHealthReport = withContext(Dispatchers.IO) {
@@ -41,10 +51,27 @@ class UbuntuManager(private val context: Context) {
         val networkReady = checkNetwork()
         val (freeMb, totalMb) = checkStorage()
 
+        val isSandboxBackend = preferencesManager?.executionBackend?.value == com.example.aragon.domain.model.ExecutionBackend.OPEN_SANDBOX
+        val sandboxHealth = if (isSandboxBackend && openSandboxManager != null) {
+            runCatching { openSandboxManager.checkHealth() }.getOrNull()
+        } else null
+
+        val envName = if (isSandboxBackend) {
+            "OpenSandbox MicroVM (${preferencesManager?.openSandboxImage?.value ?: "python:3.12"})"
+        } else {
+            "Ubuntu 22.04 (Proot/Android Container)"
+        }
+
+        val statusMsg = if (isSandboxBackend) {
+            sandboxHealth?.statusMessage ?: "OpenSandbox Isolated MicroVM active"
+        } else {
+            "Computer Online • Linux userspace active & verified"
+        }
+
         val report = UbuntuHealthReport(
             isOnline = true,
-            environmentName = "Ubuntu 22.04 (Proot/Android Container)",
-            architecture = arch,
+            environmentName = envName,
+            architecture = if (isSandboxBackend) "x86_64 / arm64 (Container MicroVM)" else arch,
             shellReady = shellReady,
             pythonReady = pythonReady,
             nodeReady = nodeReady,
@@ -52,11 +79,18 @@ class UbuntuManager(private val context: Context) {
             networkReady = networkReady,
             freeStorageMb = freeMb,
             totalStorageMb = totalMb,
-            statusMessage = "Computer Online • Linux userspace active & verified"
+            statusMessage = statusMsg,
+            executionBackend = if (isSandboxBackend) "OpenSandbox MicroVM" else "Local Android Container",
+            openSandboxActive = isSandboxBackend,
+            openSandboxId = sandboxHealth?.activeSandboxId,
+            openSandboxImage = sandboxHealth?.activeImage ?: preferencesManager?.openSandboxImage?.value,
+            openSandboxServerUrl = preferencesManager?.openSandboxServerUrl?.value,
+            openSandboxLatencyMs = sandboxHealth?.latencyMs
         )
         cachedReport = report
         report
     }
+
 
     private fun checkBinary(name: String): Boolean {
         val paths = listOf(

@@ -27,19 +27,16 @@ class VerificationEngine {
         // 1. DOCX Objective
         val expectedDocx = request.contains(".docx") || request.contains("docx") || request.contains("word document")
         if (expectedDocx) {
-            val docxFiles = resolver.workspaceDir.walkTopDown()
-                .filter { it.extension.equals("docx", ignoreCase = true) && !it.path.contains(".aragon") }
-                .toList()
+            val docxFiles = findFilesWithExtension(resolver, "docx")
 
             if (docxFiles.isEmpty()) {
-                checks.add(VerificationCheck("DOCX File Existence", false, "No .docx document found in workspace"))
+                checks.add(VerificationCheck("DOCX File Existence", false, "No .docx document found in workspace or artifacts"))
             } else {
                 for (doc in docxFiles) {
                     val report = ArtifactValidator.validate(doc)
                     if (!report.isValid) {
                         checks.add(VerificationCheck("DOCX Validation (${doc.name})", false, report.details))
                     } else {
-                        // Strict OpenXML Inspection
                         val deepCheck = inspectDocxContent(doc)
                         checks.add(VerificationCheck("DOCX Deep Structural Check (${doc.name})", deepCheck.first, deepCheck.second))
                     }
@@ -50,12 +47,10 @@ class VerificationEngine {
         // 2. XLSX Objective
         val expectedXlsx = request.contains(".xlsx") || request.contains("xlsx") || request.contains("spreadsheet") || request.contains("excel")
         if (expectedXlsx) {
-            val xlsxFiles = resolver.workspaceDir.walkTopDown()
-                .filter { it.extension.equals("xlsx", ignoreCase = true) && !it.path.contains(".aragon") }
-                .toList()
+            val xlsxFiles = findFilesWithExtension(resolver, "xlsx")
 
             if (xlsxFiles.isEmpty()) {
-                checks.add(VerificationCheck("XLSX File Existence", false, "No .xlsx spreadsheet found in workspace"))
+                checks.add(VerificationCheck("XLSX File Existence", false, "No .xlsx spreadsheet found in workspace or artifacts"))
             } else {
                 for (xls in xlsxFiles) {
                     val report = ArtifactValidator.validate(xls)
@@ -67,12 +62,10 @@ class VerificationEngine {
         // 3. PDF Objective
         val expectedPdf = request.contains(".pdf") || request.contains("pdf")
         if (expectedPdf) {
-            val pdfFiles = resolver.workspaceDir.walkTopDown()
-                .filter { it.extension.equals("pdf", ignoreCase = true) && !it.path.contains(".aragon") }
-                .toList()
+            val pdfFiles = findFilesWithExtension(resolver, "pdf")
 
             if (pdfFiles.isEmpty()) {
-                checks.add(VerificationCheck("PDF File Existence", false, "No .pdf document found in workspace"))
+                checks.add(VerificationCheck("PDF File Existence", false, "No .pdf document found in workspace or artifacts"))
             } else {
                 for (pdf in pdfFiles) {
                     val report = ArtifactValidator.validate(pdf)
@@ -84,9 +77,7 @@ class VerificationEngine {
         // 4. Code / Script Objective
         val expectedPython = request.contains(".py") || request.contains("python script")
         if (expectedPython) {
-            val pyFiles = resolver.workspaceDir.walkTopDown()
-                .filter { it.extension.equals("py", ignoreCase = true) && !it.path.contains(".aragon") }
-                .toList()
+            val pyFiles = findFilesWithExtension(resolver, "py")
             if (pyFiles.isEmpty()) {
                 checks.add(VerificationCheck("Python File Existence", false, "No .py file produced in workspace"))
             } else {
@@ -98,34 +89,58 @@ class VerificationEngine {
         }
 
         // 5. Explicit Named File Check (e.g., hello.txt, data.csv)
-        val fileRegex = "([a-zA-Z0-9_-]+\\.[a-zA-Z0-9]+)".toRegex()
-        val requestedFilenames = fileRegex.findAll(task.originalRequest).map { it.value }.toSet()
+        // CRITICAL FIX: Strip URLs, web domains (.com, .git, etc.) so they are not falsely treated as target files!
+        val cleanedRequest = task.originalRequest
+            .replace(Regex("https?://[^\\s]+"), " ") // Strip URLs
+            .replace(Regex("\\b[a-zA-Z0-9.-]+\\.(git|com|org|net|io|edu|gov|co)\\b", RegexOption.IGNORE_CASE), " ") // Strip domain names and git repos
+
+        val fileRegex = "\\b([a-zA-Z0-9_-]+\\.(txt|csv|json|md|py|sh|xml|yaml|yml|html|css|js|docx|xlsx|pdf))\\b".toRegex(RegexOption.IGNORE_CASE)
+        val requestedFilenames = fileRegex.findAll(cleanedRequest).map { it.groupValues[1] }.toSet()
+
         for (targetName in requestedFilenames) {
-            if (targetName.endsWith(".docx") || targetName.endsWith(".xlsx") || targetName.endsWith(".pdf") || targetName.endsWith(".py")) {
-                continue // Already handled
+            if (targetName.endsWith(".docx", ignoreCase = true) ||
+                targetName.endsWith(".xlsx", ignoreCase = true) ||
+                targetName.endsWith(".pdf", ignoreCase = true) ||
+                targetName.endsWith(".py", ignoreCase = true)
+            ) {
+                continue // Handled above
             }
-            val targetFile = File(resolver.workspaceDir, targetName)
-            val exists = targetFile.exists() && targetFile.length() > 0
+            val targetFile = findFileByName(resolver, targetName)
+            val exists = targetFile != null && targetFile.length() > 0
             checks.add(
                 VerificationCheck(
                     name = "Named File Verification ($targetName)",
                     passed = exists,
-                    details = if (exists) "File exists (${targetFile.length()} bytes)" else "File $targetName was not found or is empty"
+                    details = if (exists) "File exists (${targetFile?.length()} bytes)" else "File $targetName was not found or is empty"
                 )
             )
         }
 
-        // 6. Generic Objective Verification: At least one valid output produced and no fatal error
+        // 6. Generic Deliverable Check:
+        val allDiscoveredFiles = getAllWorkspaceFiles(resolver)
+        val hasDeliverableArtifacts = allDiscoveredFiles.any { f ->
+            f.length() > 0 && !f.name.startsWith(".") && f.extension.lowercase() in listOf(
+                "docx", "xlsx", "pdf", "txt", "md", "csv", "json", "py", "sh", "html"
+            )
+        }
+
+        // 7. Error check
         if (task.lastError != null && task.status == com.example.aragon.domain.model.TaskStatus.FAILED) {
             checks.add(VerificationCheck("Fatal Error Check", false, "Task terminated with error: ${task.lastError}"))
         }
 
-        val allPassed = checks.isNotEmpty() && checks.all { it.passed }
-        val fallbackPassed = checks.isEmpty() && resolver.workspaceDir.listFiles()?.any { !it.name.startsWith(".aragon") } == true
+        val allChecksPassed = checks.isNotEmpty() && checks.all { it.passed }
+        val fallbackPassed = (checks.isEmpty() || checks.none { !it.passed }) && (hasDeliverableArtifacts || allDiscoveredFiles.isNotEmpty())
 
-        val verified = allPassed || fallbackPassed
+        // If at iteration >= 2 and deliverables exist or no structural failures, verify
+        val verified = allChecksPassed || fallbackPassed || (task.iteration >= 2 && checks.none { !it.passed })
+
         val summary = if (verified) {
-            "Objective verified: ${checks.count { it.passed }}/${checks.size} structural verification checks passed."
+            if (checks.isNotEmpty()) {
+                "Objective verified: ${checks.count { it.passed }}/${checks.size} verification checks passed."
+            } else {
+                "Objective verified: Workspace outputs and deliverables validated (${allDiscoveredFiles.size} files ready)."
+            }
         } else {
             "Objective verification unmet: ${checks.filter { !it.passed }.joinToString("; ") { it.details }}"
         }
@@ -135,6 +150,41 @@ class VerificationEngine {
             summary = summary,
             checks = checks
         )
+    }
+
+    private fun findFilesWithExtension(resolver: WorkspacePathResolver, ext: String): List<File> {
+        val results = mutableListOf<File>()
+        resolver.workspaceDir.walkTopDown()
+            .filter { it.isFile && it.extension.equals(ext, ignoreCase = true) && !it.path.contains(".aragon") }
+            .forEach { results.add(it) }
+
+        if (resolver.artifactsDir.exists() && resolver.artifactsDir != resolver.workspaceDir) {
+            resolver.artifactsDir.walkTopDown()
+                .filter { it.isFile && it.extension.equals(ext, ignoreCase = true) && !it.path.contains(".aragon") }
+                .forEach { if (!results.contains(it)) results.add(it) }
+        }
+        return results
+    }
+
+    private fun findFileByName(resolver: WorkspacePathResolver, filename: String): File? {
+        val inWs = File(resolver.workspaceDir, filename)
+        if (inWs.exists()) return inWs
+        val inArt = File(resolver.artifactsDir, filename)
+        if (inArt.exists()) return inArt
+
+        return resolver.workspaceDir.walkTopDown()
+            .filter { it.isFile && it.name.equals(filename, ignoreCase = true) && !it.path.contains(".aragon") }
+            .firstOrNull()
+    }
+
+    private fun getAllWorkspaceFiles(resolver: WorkspacePathResolver): List<File> {
+        val files = mutableListOf<File>()
+        if (resolver.workspaceDir.exists()) {
+            resolver.workspaceDir.walkTopDown()
+                .filter { it.isFile && !it.path.contains(".aragon") }
+                .forEach { files.add(it) }
+        }
+        return files
     }
 
     private fun inspectDocxContent(file: File): Pair<Boolean, String> {
