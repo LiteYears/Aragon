@@ -244,6 +244,40 @@ class ToolRegistry {
 
         register(
             ToolDefinition(
+                name = "document_create",
+                description = "Generate a verified OpenXML DOCX document deliverable with structured sections, executive summary, bullet points, and data tables. Automatically saves to /artifacts/<filename>.docx",
+                parameters = listOf(
+                    ToolParameter("filename", "string", "Destination filename or logical path (e.g. /artifacts/report.docx or report.docx)", required = true),
+                    ToolParameter("title", "string", "Document main title (e.g. 'Executive Administrative Report')", required = true),
+                    ToolParameter("subtitle", "string", "Optional document subtitle or inspection header", required = false),
+                    ToolParameter("paragraphs", "string", "Document body paragraphs (JSON array of strings or newline-separated text)", required = false),
+                    ToolParameter("bulletPoints", "string", "Key findings or bullet points (JSON array of strings or newline-separated text)", required = false),
+                    ToolParameter("tableHeaders", "string", "Table column headers (JSON array of strings, e.g. [\"Metric\", \"Value\", \"Status\"])", required = false),
+                    ToolParameter("tableRows", "string", "Table data rows (JSON array of string arrays or comma-separated rows)", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "docx_generate",
+                description = "Alias for document_create: generate a verified OpenXML DOCX document deliverable.",
+                parameters = listOf(
+                    ToolParameter("filename", "string", "Destination filename or logical path (e.g. /artifacts/report.docx)", required = true),
+                    ToolParameter("title", "string", "Document main title", required = true),
+                    ToolParameter("subtitle", "string", "Optional document subtitle", required = false),
+                    ToolParameter("paragraphs", "string", "Document body paragraphs", required = false),
+                    ToolParameter("bulletPoints", "string", "Key findings or bullet points", required = false),
+                    ToolParameter("tableHeaders", "string", "Table column headers", required = false),
+                    ToolParameter("tableRows", "string", "Table data rows", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
                 name = "complete_task",
                 description = "Explicitly signal that all requested objectives, files, or analysis have been successfully created and completed.",
                 parameters = listOf(

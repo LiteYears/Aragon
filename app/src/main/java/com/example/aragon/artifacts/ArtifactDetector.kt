@@ -10,36 +10,44 @@ class ArtifactDetector {
 
     fun scan(taskId: String, resolver: WorkspacePathResolver): List<Artifact> {
         val discovered = mutableListOf<Artifact>()
-        val baseDir = resolver.workspaceDir
-        if (!baseDir.exists()) return emptyList()
+        val seenPaths = mutableSetOf<String>()
 
-        baseDir.walkTopDown()
-            .filter { it.isFile && !it.path.contains(".aragon") }
-            .forEach { file ->
-                val logicalPath = resolver.toLogicalPath(file)
-                val stage = classifyStage(file, logicalPath)
-                val report = ArtifactValidator.validate(file)
+        fun processFile(file: File) {
+            if (!file.isFile || file.path.contains(".aragon")) return
+            val canonical = file.canonicalPath
+            if (!seenPaths.add(canonical)) return
 
-                discovered.add(
-                    Artifact(
-                        id = UUID.randomUUID().toString(),
-                        taskId = taskId,
-                        logicalPath = logicalPath,
-                        filename = file.name,
-                        mimeType = report.mimeType,
-                        size = file.length(),
-                        createdAt = file.lastModified(),
-                        modifiedAt = file.lastModified(),
-                        stage = stage,
-                        valid = report.isValid,
-                        verified = report.isValid,
-                        previewable = isPreviewable(report.mimeType),
-                        shareable = stage == ArtifactStage.PRODUCT && report.isValid,
-                        downloadable = true,
-                        validationDetails = report.details
-                    )
+            val logicalPath = resolver.toLogicalPath(file)
+            val stage = classifyStage(file, logicalPath)
+            val report = ArtifactValidator.validate(file)
+
+            discovered.add(
+                Artifact(
+                    id = UUID.randomUUID().toString(),
+                    taskId = taskId,
+                    logicalPath = logicalPath,
+                    filename = file.name,
+                    mimeType = report.mimeType,
+                    size = file.length(),
+                    createdAt = file.lastModified(),
+                    modifiedAt = file.lastModified(),
+                    stage = stage,
+                    valid = report.isValid,
+                    verified = report.isValid,
+                    previewable = isPreviewable(report.mimeType),
+                    shareable = stage == ArtifactStage.PRODUCT && report.isValid,
+                    downloadable = true,
+                    validationDetails = report.details
                 )
-            }
+            )
+        }
+
+        if (resolver.workspaceDir.exists()) {
+            resolver.workspaceDir.walkTopDown().forEach { processFile(it) }
+        }
+        if (resolver.artifactsDir.exists()) {
+            resolver.artifactsDir.walkTopDown().forEach { processFile(it) }
+        }
 
         return discovered
     }
