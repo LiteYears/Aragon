@@ -1266,12 +1266,6 @@ class ToolExecutor(
             )
         )
 
-        openSandboxManager?.let { mgr ->
-            runCatching {
-                mgr.writeFile(logicalPath, "PK\u0003\u0004OpenXML-Docx")
-            }
-        }
-
         return ToolResult(
             callId = callId,
             taskId = taskId,

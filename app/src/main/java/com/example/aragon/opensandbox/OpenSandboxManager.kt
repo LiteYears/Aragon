@@ -185,8 +185,19 @@ class OpenSandboxManager(
         val emulated = client.getAllEmulatedFiles(sandboxId)
         for ((logicalPath, content) in emulated) {
             val target = resolver.resolve(logicalPath)
+            val ext = target.extension.lowercase()
+            val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
+            if (isBinary) {
+                // NEVER clobber an existing local binary file with plain text!
+                if (target.exists() && target.length() > 50) {
+                    continue
+                }
+                if (content.contains("OpenXML") || content.contains("Placeholder")) {
+                    continue
+                }
+            }
             target.parentFile?.mkdirs()
-            if (!target.exists() || target.readText() != content) {
+            if (!target.exists() || (!isBinary && target.isFile && target.readText() != content)) {
                 target.writeText(content, Charsets.UTF_8)
                 synced.add(target)
             }
@@ -204,8 +215,13 @@ class OpenSandboxManager(
                     val readRes = client.readFile(serverUrl, apiKey, current.id, p)
                     readRes.onSuccess { content ->
                         val target = resolver.resolve(p)
+                        val ext = target.extension.lowercase()
+                        val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
+                        if (isBinary && target.exists() && target.length() > 50) {
+                            return@onSuccess
+                        }
                         target.parentFile?.mkdirs()
-                        if (!target.exists() || target.readText() != content) {
+                        if (!target.exists() || (!isBinary && target.isFile && target.readText() != content)) {
                             target.writeText(content, Charsets.UTF_8)
                             synced.add(target)
                         }

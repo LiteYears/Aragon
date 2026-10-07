@@ -621,16 +621,6 @@ class OpenSandboxClient(
             if (docxMatcher.find()) {
                 val docxName = docxMatcher.group(1) ?: "report.docx"
                 val fullPath = if (docxName.startsWith("/")) docxName else "/workspace/$docxName"
-                val relPath = docxName.removePrefix("/workspace/").removePrefix("/")
-                val docxContent = "PK\u0003\u0004OpenXML-Docx-Placeholder"
-                files[fullPath] = docxContent
-                files[docxName] = docxContent
-                files[relPath] = docxContent
-                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-                    put(fullPath, docxContent)
-                    put(docxName, docxContent)
-                    put(relPath, docxContent)
-                }
                 created.add(fullPath)
             }
         }
