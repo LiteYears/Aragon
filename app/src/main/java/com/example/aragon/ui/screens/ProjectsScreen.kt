@@ -206,14 +206,14 @@ private fun DefaultProjectCards(onStartTaskInProject: (Project) -> Unit) {
                 id = "proj_reports",
                 name = "Executive Reports & Audit",
                 description = "Standard workspace for compiling verified OpenXML DOCX administrative audits.",
-                systemInstructions = "Always output formatted .docx reports into /artifacts and verify OpenXML structure.",
+                instructions = "Always output formatted .docx reports into /artifacts and verify OpenXML structure.",
                 workspacePath = "/projects/reports"
             ),
             Project(
                 id = "proj_sandbox",
                 name = "OpenSandbox MicroVM Workspace",
                 description = "Isolated microVM environment for executing Python scripts and data processing pipelines.",
-                systemInstructions = "Execute computations in OpenSandbox microVM container.",
+                instructions = "Execute computations in OpenSandbox microVM container.",
                 workspacePath = "/projects/sandbox"
             )
         )

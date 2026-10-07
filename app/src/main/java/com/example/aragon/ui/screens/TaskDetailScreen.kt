@@ -72,6 +72,7 @@ import com.example.aragon.ui.components.ArtifactViewerDialog
 import com.example.ui.theme.AmoledAccent
 import com.example.ui.theme.AmoledBg
 import com.example.ui.theme.AmoledBorder
+import com.example.ui.theme.AmoledBorderActive
 import com.example.ui.theme.AmoledCard
 import com.example.ui.theme.AmoledElevated
 import com.example.ui.theme.AmoledError
@@ -229,7 +230,8 @@ fun TaskDetailScreen(
                             lineHeight = 20.sp
                         )
 
-                        if (task.finalSummary.isNotBlank()) {
+                        val summary = task.finalSummary
+                        if (!summary.isNullOrBlank()) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Divider(color = AmoledBorder)
                             Spacer(modifier = Modifier.height(10.dp))
@@ -241,7 +243,7 @@ fun TaskDetailScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = task.finalSummary,
+                                text = summary,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = AmoledTextSecondary
                             )
