@@ -229,10 +229,11 @@ class VerificationEngine {
             )
         }
 
-        val allChecksPassed = checks.isNotEmpty() && checks.all { it.passed }
-        val fallbackPassed = (checks.isEmpty() || checks.none { !it.passed }) && (hasDeliverableArtifacts || allDiscoveredFiles.isNotEmpty())
+        val hasFailingChecks = checks.any { !it.passed }
+        val allChecksPassed = checks.isNotEmpty() && !hasFailingChecks
+        val fallbackPassed = checks.isEmpty() && hasDeliverableArtifacts
 
-        val verified = allChecksPassed || fallbackPassed || (task.iteration >= 2 && checks.none { !it.passed })
+        val verified = !hasFailingChecks && (allChecksPassed || fallbackPassed)
 
         val summary = if (verified) {
             if (checks.isNotEmpty()) {
@@ -241,7 +242,11 @@ class VerificationEngine {
                 "Objective verified: Workspace outputs and deliverables validated (${allDiscoveredFiles.size} files ready)."
             }
         } else {
-            "Objective verification unmet: ${checks.filter { !it.passed }.joinToString("; ") { it.details }}"
+            if (hasFailingChecks) {
+                "Objective verification unmet: ${checks.filter { !it.passed }.joinToString("; ") { it.details }}"
+            } else {
+                "Objective verification unmet: No valid deliverable artifacts found on disk."
+            }
         }
 
         return VerificationResult(

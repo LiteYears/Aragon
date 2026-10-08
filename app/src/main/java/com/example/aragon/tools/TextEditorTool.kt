@@ -12,8 +12,8 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class TextEditorTool {
 
-    // In-memory backup snapshots for undo/rollback protection
-    private val fileBackups = ConcurrentHashMap<String, MutableList<String>>()
+    // In-memory backup snapshots for undo/rollback protection (thread-safe)
+    private val fileBackups = ConcurrentHashMap<String, List<String>>()
 
     fun execute(
         callId: String,
@@ -206,12 +206,20 @@ class TextEditorTool {
                 }
 
                 "rollback", "undo" -> {
-                    val history = fileBackups[file.absolutePath]
-                    if (history.isNullOrEmpty()) {
+                    var previousVersion: String? = null
+                    fileBackups.compute(file.absolutePath) { _, existing ->
+                        if (existing.isNullOrEmpty()) {
+                            null
+                        } else {
+                            val list = existing.toMutableList()
+                            previousVersion = list.removeAt(list.size - 1)
+                            list
+                        }
+                    }
+                    if (previousVersion == null) {
                         return errorResult(callId, taskId, "No previous backup available for $path", startTime)
                     }
-                    val previousVersion = history.removeAt(history.size - 1)
-                    file.writeText(previousVersion)
+                    file.writeText(previousVersion!!)
                     return successResult(callId, taskId, "Successfully rolled back ${resolver.toLogicalPath(file)} to previous version.", startTime, resolver.toLogicalPath(file))
                 }
 
@@ -239,9 +247,13 @@ class TextEditorTool {
 
     private fun saveBackup(file: File) {
         if (file.exists()) {
-            val list = fileBackups.getOrPut(file.absolutePath) { mutableListOf() }
-            if (list.size >= 10) list.removeAt(0)
-            list.add(file.readText())
+            val text = file.readText()
+            fileBackups.compute(file.absolutePath) { _, existing ->
+                val list = (existing ?: emptyList()).toMutableList()
+                if (list.size >= 10) list.removeAt(0)
+                list.add(text)
+                list
+            }
         }
     }
 

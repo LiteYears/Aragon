@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel : ViewModel() {
@@ -114,20 +115,20 @@ class MainViewModel : ViewModel() {
     }
 
     fun launchTask(request: String, mode: AgentMode, projectId: String? = null): String {
-        var createdId = ""
+        val taskId = UUID.randomUUID().toString()
+        _selectedTaskId.value = taskId
         viewModelScope.launch {
             val task = taskRepo.createTask(
                 request = request,
                 title = request.take(45),
                 selectedModel = selectedModel.value,
                 mode = mode,
-                projectId = projectId
+                projectId = projectId,
+                taskId = taskId
             )
-            createdId = task.id
-            _selectedTaskId.value = task.id
             agentHarness.startTask(task.id)
         }
-        return createdId
+        return taskId
     }
 
     fun approvePlan(taskId: String) {

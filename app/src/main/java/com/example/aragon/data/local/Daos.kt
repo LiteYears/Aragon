@@ -115,6 +115,12 @@ interface ToolExecutionDao {
     @Query("SELECT * FROM tool_executions WHERE callId = :callId LIMIT 1")
     suspend fun getExecutionByCallId(callId: String): ToolExecutionEntity?
 
+    @Query("SELECT * FROM tool_executions WHERE status = :status ORDER BY timestamp ASC")
+    suspend fun getExecutionsByStatus(status: String): List<ToolExecutionEntity>
+
+    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId AND status = :status ORDER BY timestamp ASC")
+    suspend fun getExecutionsForTaskByStatus(taskId: String, status: String): List<ToolExecutionEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertExecution(execution: ToolExecutionEntity)
 

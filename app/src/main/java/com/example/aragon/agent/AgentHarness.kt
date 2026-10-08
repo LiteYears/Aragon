@@ -33,7 +33,7 @@ class AgentHarness(
     private val preferencesManager: PreferencesManager,
     private val openSandboxManager: com.example.aragon.opensandbox.OpenSandboxManager? = null,
     val approvalManager: ApprovalManager = ApprovalManager(),
-    val toolDispatcher: ToolDispatcher = ToolDispatcher(toolExecutor, approvalManager, toolRegistry),
+    val toolDispatcher: ToolDispatcher = ToolDispatcher(toolExecutor, approvalManager, toolRegistry, toolExecutionDao),
     val orchestrator: SessionOrchestrator = SessionOrchestrator(
         taskDao = taskDao,
         projectDao = projectDao,

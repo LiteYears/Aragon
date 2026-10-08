@@ -263,7 +263,8 @@ data class ToolExecutionEntity(
     val dispatchedAt: Long = timestamp,
     val startedAt: Long = timestamp,
     val completedAt: Long = timestamp,
-    val status: String = if (success) "SUCCEEDED" else "FAILED"
+    val status: String = if (success) "SUCCEEDED" else "FAILED",
+    val artifacts: List<String> = emptyList()
 ) {
     fun toDomainResult(): ToolResult = ToolResult(
         callId = callId,
@@ -278,6 +279,9 @@ data class ToolExecutionEntity(
         errorMessage = errorMessage,
         startedAt = startedAt,
         completedAt = completedAt,
+        toolName = toolName,
+        argumentsJson = argumentsJson,
+        artifacts = artifacts,
         status = runCatching { com.example.aragon.domain.model.ToolExecutionStatus.valueOf(status) }
             .getOrDefault(if (success) com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED else com.example.aragon.domain.model.ToolExecutionStatus.FAILED)
     )

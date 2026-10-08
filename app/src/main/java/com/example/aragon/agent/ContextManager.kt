@@ -17,10 +17,11 @@ class ContextManager(
     private val maxInlineOutputLength: Int = 1200,
     private val maxRecentResultsInline: Int = 6
 ) {
-    private val failedApproaches = mutableListOf<FailedApproach>()
+    private val failedApproachesByTask = java.util.concurrent.ConcurrentHashMap<String, MutableList<FailedApproach>>()
 
-    fun recordFailedApproach(strategy: String, error: String, context: String) {
-        failedApproaches.add(
+    fun recordFailedApproach(taskId: String, strategy: String, error: String, context: String) {
+        val list = failedApproachesByTask.computeIfAbsent(taskId) { java.util.Collections.synchronizedList(mutableListOf()) }
+        list.add(
             FailedApproach(
                 id = UUID.randomUUID().toString(),
                 strategy = strategy,
@@ -31,7 +32,16 @@ class ContextManager(
         )
     }
 
-    fun getFailedApproaches(): List<FailedApproach> = failedApproaches.toList()
+    fun recordFailedApproach(strategy: String, error: String, context: String) {
+        recordFailedApproach("default", strategy, error, context)
+    }
+
+    fun getFailedApproaches(taskId: String): List<FailedApproach> {
+        val list = failedApproachesByTask[taskId] ?: return emptyList()
+        return synchronized(list) { list.toList() }
+    }
+
+    fun getFailedApproaches(): List<FailedApproach> = getFailedApproaches("default")
 
     fun storeObservation(
         resolver: WorkspacePathResolver,
@@ -148,9 +158,10 @@ class ContextManager(
                 }
             }
 
-            if (failedApproaches.isNotEmpty()) {
+            val taskFailures = getFailedApproaches(task.id)
+            if (taskFailures.isNotEmpty()) {
                 appendLine("\n### FAILED APPROACH MEMORY (DO NOT REPEAT):")
-                failedApproaches.takeLast(3).forEach {
+                taskFailures.takeLast(3).forEach {
                     appendLine("- Strategy '${it.strategy}' failed: ${it.error}")
                 }
             }
@@ -170,17 +181,32 @@ class ContextManager(
         // 4. Recent tool executions with strictly compliant Assistant tool_call -> Tool observation pairs
         val resultsToInclude = recentToolResults.takeLast(maxRecentResultsInline)
         for ((toolName, result) in resultsToInclude) {
-            val content = buildString {
-                appendLine("Tool: $toolName")
-                appendLine("ExitCode: ${result.exitCode}, Success: ${result.success}")
+            val callName = if (toolName.isNotBlank()) toolName else result.toolName
+            val callArgs = if (result.argumentsJson.isNotBlank() && result.argumentsJson != "{}") result.argumentsJson else "{}"
+
+            val observationContent = buildString {
+                appendLine("=== TOOL OBSERVATION ===")
+                appendLine("Tool Call ID: ${result.callId}")
+                appendLine("Tool: $callName")
+                if (callArgs != "{}") {
+                    appendLine("Arguments: $callArgs")
+                }
+                appendLine("Environment: ${result.environment} (${result.workingDirectory})")
+                appendLine("Status: ${result.status.name} (Success: ${result.success}, ExitCode: ${result.exitCode})")
+                if (result.durationMs > 0) {
+                    appendLine("Duration: ${result.durationMs}ms")
+                }
+                if (result.artifacts.isNotEmpty()) {
+                    appendLine("Artifacts Produced: ${result.artifacts.joinToString()}")
+                }
                 if (result.stdout.isNotBlank()) {
                     appendLine("STDOUT (truncated):\n${result.stdout.take(maxInlineOutputLength)}")
                 }
                 if (result.stderr.isNotBlank()) {
-                    appendLine("STDERR:\n${result.stderr.take(maxInlineOutputLength)}")
+                    appendLine("STDERR (truncated):\n${result.stderr.take(maxInlineOutputLength)}")
                 }
-                if (result.artifacts.isNotEmpty()) {
-                    appendLine("Artifacts produced: ${result.artifacts.joinToString()}")
+                if (!result.errorMessage.isNullOrBlank()) {
+                    appendLine("Error: ${result.errorMessage}")
                 }
             }
 
@@ -192,8 +218,8 @@ class ContextManager(
                     toolCalls = listOf(
                         com.example.aragon.llm.LlmToolCall(
                             id = result.callId,
-                            name = toolName,
-                            argumentsJson = "{}"
+                            name = callName,
+                            argumentsJson = callArgs
                         )
                     )
                 )
@@ -202,9 +228,9 @@ class ContextManager(
             messages.add(
                 LlmMessage(
                     role = LlmRole.TOOL,
-                    name = toolName,
+                    name = callName,
                     toolCallId = result.callId,
-                    content = content
+                    content = observationContent
                 )
             )
         }
@@ -226,7 +252,7 @@ class ContextManager(
             appendLine("Iterations Completed: ${task.iteration}")
             appendLine("Messages Count: ${messages.size}")
             appendLine("\n## Key Decisions and Failures:")
-            failedApproaches.forEach {
+            getFailedApproaches(task.id).forEach {
                 appendLine("- Failed: ${it.strategy} (${it.error})")
             }
         }

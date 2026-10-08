@@ -27,7 +27,7 @@ class ArtifactDetector {
             val logicalPath = resolver.toLogicalPath(file)
             val stage = classifyStage(file, logicalPath)
             val report = ArtifactValidator.validate(file)
-            val exists = file.exists() && file.isFile && file.canRead()
+            val exists = file.exists() && file.isFile && file.canRead() && file.length() > 0L
 
             discovered.add(
                 Artifact(
@@ -44,7 +44,7 @@ class ArtifactDetector {
                     verified = report.isValid && exists,
                     previewable = isPreviewable(report.mimeType),
                     shareable = stage == ArtifactStage.PRODUCT && report.isValid && exists,
-                    downloadable = exists,
+                    downloadable = report.isValid && exists,
                     validationDetails = if (exists) report.details else "File missing or inaccessible",
                     existsOnDisk = exists
                 )

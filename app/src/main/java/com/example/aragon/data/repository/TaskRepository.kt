@@ -42,10 +42,11 @@ class TaskRepository(
         title: String = request.take(40),
         selectedModel: String,
         mode: AgentMode,
-        projectId: String? = null
+        projectId: String? = null,
+        taskId: String = UUID.randomUUID().toString()
     ): Task {
         val task = Task(
-            id = UUID.randomUUID().toString(),
+            id = taskId,
             projectId = projectId,
             title = title,
             originalRequest = request,

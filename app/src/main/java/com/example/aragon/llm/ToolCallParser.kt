@@ -161,4 +161,34 @@ object ToolCallParser {
                 lower.contains("successfully generated")
         return claimsAction
     }
+
+    /**
+     * Determines whether a tool call ID is synthetic, generic, or static (e.g. call_1, tool_call_1, default),
+     * rather than a provider-native high-entropy identifier (e.g. call_p8dF719vK..., toolu_01...).
+     */
+    fun isSyntheticOrGenericId(id: String): Boolean {
+        if (id.isBlank()) return true
+        val trimmed = id.trim()
+        if (trimmed.length < 10) return true
+
+        val lower = trimmed.lowercase()
+        val genericPlaceholders = setOf(
+            "default", "null", "undefined", "none", "call", "tool_call", "tool",
+            "call_default", "tool_default", "call_null", "call_undefined",
+            "call_run_command", "call_tool", "tool_call_1", "tool_call_0", "call_0", "call_1",
+            "function_call", "action_input", "chatcmpl_tool_call"
+        )
+        if (lower in genericPlaceholders) return true
+
+        // Sequential numbers or arbitrary-length digit counters like call_1, tool_call_00000001
+        if (lower.matches(Regex("^(call_|tool_call_|tool_|action_|func_)?[0-9]+$"))) return true
+
+        // Pure word identifiers without digits like call_execute_command, call_file_read
+        if (lower.matches(Regex("^(call_|tool_call_|tool_|action_|func_)?[a-z_]+$")) && !lower.matches(Regex(".*[0-9].*"))) {
+            return true
+        }
+
+        return false
+    }
 }
+

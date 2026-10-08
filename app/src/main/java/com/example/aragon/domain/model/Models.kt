@@ -112,13 +112,19 @@ data class Project(
 )
 
 enum class ToolExecutionStatus {
-    PLANNED,
+    CREATED,
     REQUESTED,
+    AWAITING_APPROVAL,
+    APPROVED,
     DISPATCHED,
+    EXECUTING,
     RUNNING,
     SUCCEEDED,
     FAILED,
-    CANCELLED
+    CANCELLED;
+
+    val isTerminal: Boolean
+        get() = this == SUCCEEDED || this == FAILED || this == CANCELLED
 }
 
 data class Artifact(
@@ -150,7 +156,7 @@ data class ToolCall(
     val sessionId: String = taskId,
     val iterationId: Int = 1,
     val requestedAt: Long = System.currentTimeMillis(),
-    val status: ToolExecutionStatus = ToolExecutionStatus.REQUESTED
+    val status: ToolExecutionStatus = ToolExecutionStatus.CREATED
 ) {
     val id: String get() = callId
 }
@@ -172,6 +178,9 @@ data class ToolResult(
     val errorMessage: String? = null,
     val startedAt: Long = 0L,
     val completedAt: Long = 0L,
+    val toolName: String = "",
+    val argumentsJson: String = "{}",
+    val environment: String = "LOCAL_COMPUTER",
     val status: ToolExecutionStatus = if (cancelled) ToolExecutionStatus.CANCELLED else if (success) ToolExecutionStatus.SUCCEEDED else ToolExecutionStatus.FAILED
 ) {
     val toolCallId: String get() = callId
@@ -203,7 +212,10 @@ data class ApprovalRequest(
     val proposedAction: String,
     val status: ApprovalStatus = ApprovalStatus.PENDING,
     val createdAt: Long = System.currentTimeMillis(),
-    val expiresAt: Long? = null
+    val expiresAt: Long? = null,
+    val toolCallId: String? = null,
+    val toolName: String? = null,
+    val argumentsJson: String? = null
 )
 
 enum class WorkerStatus {

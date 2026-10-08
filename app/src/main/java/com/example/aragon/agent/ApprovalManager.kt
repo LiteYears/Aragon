@@ -8,13 +8,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class ApprovalManager {
 
     private val _pendingRequests = MutableStateFlow<List<ApprovalRequest>>(emptyList())
     val pendingRequests: StateFlow<List<ApprovalRequest>> = _pendingRequests.asStateFlow()
 
-    private val completedRequests = mutableMapOf<String, ApprovalRequest>()
+    private val requests = ConcurrentHashMap<String, ApprovalRequest>()
+    private val consumedApprovals = ConcurrentHashMap.newKeySet<String>()
 
     enum class CommandRiskLevel {
         SAFE,
@@ -84,10 +86,22 @@ class ApprovalManager {
         type: ApprovalType,
         description: String,
         risk: String,
-        proposedAction: String
+        proposedAction: String,
+        toolCallId: String? = null,
+        toolName: String? = null,
+        argumentsJson: String? = null
     ): ApprovalRequest {
+        // If a request already exists for this specific toolCallId, return it idempotently
+        if (!toolCallId.isNullOrBlank()) {
+            val existing = requests.values.find { it.toolCallId == toolCallId }
+            if (existing != null) {
+                return existing
+            }
+        }
+
+        val stableId = if (!toolCallId.isNullOrBlank()) "appr_$toolCallId" else UUID.randomUUID().toString()
         val request = ApprovalRequest(
-            id = UUID.randomUUID().toString(),
+            id = stableId,
             taskId = taskId,
             type = type,
             description = description,
@@ -95,12 +109,14 @@ class ApprovalManager {
             proposedAction = proposedAction,
             status = ApprovalStatus.PENDING,
             createdAt = System.currentTimeMillis(),
-            expiresAt = System.currentTimeMillis() + 600000L // 10 minutes
+            expiresAt = System.currentTimeMillis() + 600000L, // 10 minutes
+            toolCallId = toolCallId,
+            toolName = toolName,
+            argumentsJson = argumentsJson
         )
 
-        val current = _pendingRequests.value.toMutableList()
-        current.add(request)
-        _pendingRequests.value = current
+        requests[request.id] = request
+        updatePendingFlow()
         return request
     }
 
@@ -110,23 +126,81 @@ class ApprovalManager {
 
     fun denyApproval(requestId: String) {
         updateRequestStatus(requestId, ApprovalStatus.DENIED)
+        requests[requestId]?.toolCallId?.let { consumedApprovals.add(it) }
+    }
+
+    fun restoreRequest(request: ApprovalRequest) {
+        requests[request.id] = request
+        updatePendingFlow()
+    }
+
+    fun clearRequestsForTask(taskId: String) {
+        requests.values.filter { it.taskId == taskId }.forEach { req ->
+            requests.remove(req.id)
+            req.toolCallId?.let { consumedApprovals.remove(it) }
+        }
+        updatePendingFlow()
     }
 
     fun getRequest(requestId: String): ApprovalRequest? {
-        return _pendingRequests.value.find { it.id == requestId } ?: completedRequests[requestId]
+        return requests[requestId]
+    }
+
+    fun getApprovalForCall(toolCallId: String): ApprovalRequest? {
+        return requests.values.find { it.toolCallId == toolCallId }
+    }
+
+    fun isApprovedForCall(toolCallId: String): Boolean {
+        if (consumedApprovals.contains(toolCallId)) return false
+        val req = requests.values.find { it.toolCallId == toolCallId } ?: return false
+        return req.status == ApprovalStatus.APPROVED
+    }
+
+    fun isDeniedForCall(toolCallId: String): Boolean {
+        val req = requests.values.find { it.toolCallId == toolCallId } ?: return false
+        return req.status == ApprovalStatus.DENIED
+    }
+
+    @Synchronized
+    fun consumeApprovalForCall(toolCallId: String): Boolean {
+        if (isApprovedForCall(toolCallId)) {
+            consumedApprovals.add(toolCallId)
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Atomically consumes and returns an approved request for the given task.
+     * Guarantees the approved call can execute exactly once without repeated prompts.
+     */
+    @Synchronized
+    fun consumeApprovedRequestForTask(taskId: String): ApprovalRequest? {
+        val approved = requests.values.firstOrNull { req ->
+            req.taskId == taskId &&
+                req.status == ApprovalStatus.APPROVED &&
+                !req.toolCallId.isNullOrBlank() &&
+                !consumedApprovals.contains(req.toolCallId)
+        } ?: return null
+
+        approved.toolCallId?.let { consumedApprovals.add(it) }
+        return approved
     }
 
     fun getPendingForTask(taskId: String): List<ApprovalRequest> {
-        return _pendingRequests.value.filter { it.taskId == taskId }
+        return requests.values.filter { it.taskId == taskId && it.status == ApprovalStatus.PENDING }
     }
 
     private fun updateRequestStatus(requestId: String, status: ApprovalStatus) {
-        val current = _pendingRequests.value.toMutableList()
-        val index = current.indexOfFirst { it.id == requestId }
-        if (index != -1) {
-            val updated = current.removeAt(index).copy(status = status)
-            completedRequests[requestId] = updated
-            _pendingRequests.value = current
+        requests.computeIfPresent(requestId) { _, existing ->
+            existing.copy(status = status)
         }
+        updatePendingFlow()
+    }
+
+    private fun updatePendingFlow() {
+        _pendingRequests.value = requests.values
+            .filter { it.status == ApprovalStatus.PENDING }
+            .sortedBy { it.createdAt }
     }
 }

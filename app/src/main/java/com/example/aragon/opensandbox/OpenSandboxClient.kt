@@ -836,11 +836,7 @@ Swap:              0           0           0
 
     fun getAllEmulatedFiles(sandboxId: String): Map<String, String> {
         val merged = mutableMapOf<String, String>()
-        for (store in emulatedFiles.values) {
-            merged.putAll(store)
-        }
         emulatedFiles[sandboxId]?.let { merged.putAll(it) }
-        emulatedFiles["osb_default"]?.let { merged.putAll(it) }
         return merged
     }
 }

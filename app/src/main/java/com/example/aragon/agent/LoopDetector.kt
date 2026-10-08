@@ -38,6 +38,7 @@ class LoopDetector(
         val timestamp: Long = System.currentTimeMillis()
     )
 
+    @Synchronized
     fun record(toolName: String, args: String, result: ToolResult): LoopAnalysis {
         val sig = "$toolName:${normalizeArgs(args)}"
         val outputSnippet = (if (result.stdout.isNotBlank()) result.stdout else result.stderr).take(200)
@@ -141,6 +142,7 @@ class LoopDetector(
         return args.replace("\\s+".toRegex(), " ").trim()
     }
 
+    @Synchronized
     fun reset() {
         history.clear()
         consecutiveLoopDetections = 0

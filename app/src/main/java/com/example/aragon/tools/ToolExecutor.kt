@@ -4,6 +4,7 @@ import com.example.aragon.artifacts.ArtifactValidator
 import com.example.aragon.computer.ProcessManager
 import com.example.aragon.computer.WorkspacePathResolver
 import com.example.aragon.domain.model.ToolResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -98,6 +99,8 @@ class ToolExecutor(
                     errorMessage = "Tool '$toolName' is not registered"
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             ToolResult(
                 callId = callId,
@@ -225,6 +228,7 @@ class ToolExecutor(
             val sbResult = openSandboxManager.executePythonCode(code, timeoutMs)
             openSandboxManager.syncSandboxToLocal(resolver)
 
+            val pythonArtifacts = if (localTargetFile.exists() && localTargetFile.isFile) listOf(targetLogicalPath) else emptyList()
             return ToolResult(
                 callId = callId,
                 taskId = taskId,
@@ -232,6 +236,7 @@ class ToolExecutor(
                 exitCode = sbResult.exitCode,
                 stdout = sbResult.stdout,
                 stderr = sbResult.stderr,
+                artifacts = pythonArtifacts,
                 durationMs = System.currentTimeMillis() - startTime,
                 workingDirectory = "/workspace",
                 errorType = if (sbResult.exitCode != 0) "OPENSANDBOX_PYTHON_ERROR" else null,
@@ -249,6 +254,9 @@ class ToolExecutor(
             if (fallbackResult.success) {
                 // Keep OpenSandbox microVM in sync with any created outputs
                 openSandboxManager?.syncSandboxToLocal(resolver)
+                val fallbackArtifacts = fallbackResult.artifacts.ifEmpty {
+                    if (localTargetFile.exists() && localTargetFile.isFile) listOf(targetLogicalPath) else emptyList()
+                }
                 return ToolResult(
                     callId = callId,
                     taskId = taskId,
@@ -256,6 +264,7 @@ class ToolExecutor(
                     exitCode = fallbackResult.exitCode,
                     stdout = fallbackResult.stdout,
                     stderr = fallbackResult.stderr,
+                    artifacts = fallbackArtifacts,
                     durationMs = System.currentTimeMillis() - startTime,
                     workingDirectory = "/workspace"
                 )
@@ -265,6 +274,7 @@ class ToolExecutor(
         // Sync back any outputs
         openSandboxManager?.syncSandboxToLocal(resolver)
 
+        val localArtifacts = if (localTargetFile.exists() && localTargetFile.isFile) listOf(targetLogicalPath) else emptyList()
         return ToolResult(
             callId = callId,
             taskId = taskId,
@@ -272,6 +282,7 @@ class ToolExecutor(
             exitCode = result.exitCode,
             stdout = result.stdout,
             stderr = result.stderr,
+            artifacts = localArtifacts,
             durationMs = System.currentTimeMillis() - startTime,
             workingDirectory = "/workspace",
             errorType = if (result.exitCode != 0) "PYTHON_ERROR" else null,
@@ -392,6 +403,10 @@ class ToolExecutor(
             exitCode = 0,
             stdout = stdoutSb.toString().trimEnd(),
             stderr = "",
+            artifacts = createdFiles.distinct().filter {
+                val f = resolver.resolve(it)
+                f.exists() && f.isFile && f.length() > 0L
+            },
             durationMs = 50,
             workingDirectory = "/workspace"
         )
@@ -601,7 +616,21 @@ class ToolExecutor(
         resolver: WorkspacePathResolver,
         startTime: Long
     ): ToolResult {
-        val pathLogical = args.optString("path", "")
+        val pathLogical = args.optString("path", "").trim()
+        if (pathLogical.isBlank()) {
+            return ToolResult(
+                callId = callId,
+                taskId = taskId,
+                success = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "File path cannot be blank",
+                durationMs = System.currentTimeMillis() - startTime,
+                workingDirectory = "/workspace",
+                errorType = "INVALID_ARGUMENTS",
+                errorMessage = "File path cannot be blank"
+            )
+        }
         val content = args.optString("content", "")
         val overwrite = args.optBoolean("overwrite", true)
 
@@ -643,7 +672,23 @@ class ToolExecutor(
             }
         }
 
-        val createdArtifacts = if (targetFile.exists() && targetFile.isFile) listOf(pathLogical) else emptyList()
+        val writeSuccess = targetFile.exists() && targetFile.isFile && (content.isEmpty() || targetFile.length() > 0L)
+        val createdArtifacts = if (writeSuccess && targetFile.length() > 0L) listOf(pathLogical) else emptyList()
+
+        if (!writeSuccess) {
+            return ToolResult(
+                callId = callId,
+                taskId = taskId,
+                success = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "Failed to verify file write on disk for path: $pathLogical",
+                durationMs = System.currentTimeMillis() - startTime,
+                workingDirectory = "/workspace",
+                errorType = "WRITE_VERIFICATION_FAILED",
+                errorMessage = "File does not exist or was not created on disk"
+            )
+        }
 
         return ToolResult(
             callId = callId,
@@ -1306,6 +1351,23 @@ OpenSandbox Resource Telemetry:
                 )
             )
         )
+
+        val report = com.example.aragon.artifacts.ArtifactValidator.validate(targetFile)
+        if (!report.isValid || !targetFile.exists() || !targetFile.isFile) {
+            return ToolResult(
+                callId = callId,
+                taskId = taskId,
+                success = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "DOCX generation failed validation: ${report.details}",
+                artifacts = emptyList(),
+                durationMs = System.currentTimeMillis() - startTime,
+                workingDirectory = "/artifacts",
+                errorType = "VALIDATION_FAILED",
+                errorMessage = report.details
+            )
+        }
 
         return ToolResult(
             callId = callId,

@@ -23,13 +23,13 @@ class ArtifactManager(
 
     fun getProductArtifactsForTask(taskId: String): Flow<List<Artifact>> {
         return artifactDao.getArtifactsForTaskFlow(taskId).map { list ->
-            list.filter { it.stage == ArtifactStage.PRODUCT }.map { it.toDomain() }
+            list.filter { it.stage == ArtifactStage.PRODUCT && it.existsOnDisk && it.valid }.map { it.toDomain() }
         }
     }
 
     fun getAllArtifacts(): Flow<List<Artifact>> {
         return artifactDao.getAllArtifactsFlow().map { list ->
-            list.map { it.toDomain() }
+            list.filter { it.existsOnDisk && it.valid }.map { it.toDomain() }
         }
     }
 
@@ -40,7 +40,7 @@ class ArtifactManager(
         resolver: WorkspacePathResolver
     ): Artifact? = withContext(Dispatchers.IO) {
         val file = resolver.resolve(logicalPath)
-        if (!file.exists() || !file.isFile || !file.canRead()) {
+        if (!file.exists() || !file.isFile || !file.canRead() || file.length() == 0L) {
             return@withContext null
         }
 
@@ -65,7 +65,7 @@ class ArtifactManager(
             verified = report.isValid,
             previewable = true,
             shareable = stage == ArtifactStage.PRODUCT && report.isValid,
-            downloadable = true,
+            downloadable = report.isValid && file.exists(),
             validationDetails = report.details,
             stage = stage,
             sourceToolInvocationId = sourceToolInvocationId,
@@ -121,7 +121,7 @@ class ArtifactManager(
                     verified = art.verified,
                     mimeType = art.mimeType,
                     stage = art.stage,
-                    downloadable = art.existsOnDisk,
+                    downloadable = art.existsOnDisk && art.valid,
                     existsOnDisk = art.existsOnDisk,
                     validationDetails = art.validationDetails,
                     sourceToolInvocationId = existing.sourceToolInvocationId ?: activeToolInvocationId
