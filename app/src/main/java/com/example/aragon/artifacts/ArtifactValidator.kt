@@ -4,13 +4,29 @@ import java.io.File
 import java.io.FileInputStream
 import java.util.zip.ZipFile
 
+import java.security.MessageDigest
+
 data class ValidationReport(
     val isValid: Boolean,
     val mimeType: String,
-    val details: String
+    val details: String,
+    val contentHash: String? = null
 )
 
 object ArtifactValidator {
+
+    fun computeHash(file: File): String? = runCatching {
+        if (!file.exists() || !file.isFile || file.length() == 0L) return null
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { fis ->
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
+            while (fis.read(buffer).also { bytesRead = it } != -1) {
+                digest.update(buffer, 0, bytesRead)
+            }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }.getOrNull()
 
     fun validate(file: File): ValidationReport {
         if (!file.exists()) {
@@ -42,10 +58,12 @@ object ArtifactValidator {
                 val hasContentTypes = zip.getEntry("[Content_Types].xml") != null
                 val hasDocumentXml = zip.getEntry("word/document.xml") != null
                 if (hasContentTypes && hasDocumentXml) {
+                    val hash = computeHash(file)
                     ValidationReport(
                         isValid = true,
                         mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        details = "Valid OpenXML DOCX (contains [Content_Types].xml and word/document.xml)"
+                        details = "Valid OpenXML DOCX (contains [Content_Types].xml and word/document.xml)",
+                        contentHash = hash
                     )
                 } else {
                     ValidationReport(
@@ -70,7 +88,8 @@ object ArtifactValidator {
             FileInputStream(file).use { it.read(header) }
             val headerStr = String(header, Charsets.US_ASCII)
             if (headerStr.startsWith("%PDF-")) {
-                ValidationReport(true, "application/pdf", "Valid PDF header ($headerStr)")
+                val hash = computeHash(file)
+                ValidationReport(true, "application/pdf", "Valid PDF header ($headerStr)", contentHash = hash)
             } else {
                 ValidationReport(false, "application/pdf", "Invalid PDF: missing %PDF- magic signature")
             }
@@ -85,7 +104,8 @@ object ArtifactValidator {
             FileInputStream(file).use { it.read(header) }
             val pngMagic = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
             if (header.contentEquals(pngMagic)) {
-                ValidationReport(true, "image/png", "Valid PNG 8-byte magic header")
+                val hash = computeHash(file)
+                ValidationReport(true, "image/png", "Valid PNG 8-byte magic header", contentHash = hash)
             } else {
                 ValidationReport(false, "image/png", "Invalid PNG: signature mismatch")
             }
@@ -99,7 +119,8 @@ object ArtifactValidator {
             val header = ByteArray(2)
             FileInputStream(file).use { it.read(header) }
             if (header[0] == 0xFF.toByte() && header[1] == 0xD8.toByte()) {
-                ValidationReport(true, "image/jpeg", "Valid JPEG SOI marker")
+                val hash = computeHash(file)
+                ValidationReport(true, "image/jpeg", "Valid JPEG SOI marker", contentHash = hash)
             } else {
                 ValidationReport(false, "image/jpeg", "Invalid JPEG: missing SOI marker")
             }
@@ -113,7 +134,8 @@ object ArtifactValidator {
             ZipFile(file).use { zip ->
                 val hasManifest = zip.getEntry("AndroidManifest.xml") != null
                 if (hasManifest) {
-                    ValidationReport(true, "application/vnd.android.package-archive", "Valid APK package with AndroidManifest.xml")
+                    val hash = computeHash(file)
+                    ValidationReport(true, "application/vnd.android.package-archive", "Valid APK package with AndroidManifest.xml", contentHash = hash)
                 } else {
                     ValidationReport(false, "application/vnd.android.package-archive", "Invalid APK: missing AndroidManifest.xml")
                 }
@@ -126,7 +148,8 @@ object ArtifactValidator {
     private fun validateZip(file: File): ValidationReport {
         return try {
             ZipFile(file).use {
-                ValidationReport(true, "application/zip", "Valid ZIP archive (${it.size()} entries)")
+                val hash = computeHash(file)
+                ValidationReport(true, "application/zip", "Valid ZIP archive (${it.size()} entries)", contentHash = hash)
             }
         } catch (e: Exception) {
             ValidationReport(false, "application/zip", "Corrupt ZIP archive: ${e.message}")
@@ -138,7 +161,8 @@ object ArtifactValidator {
             ZipFile(file).use { zip ->
                 val hasWorkbook = zip.getEntry("xl/workbook.xml") != null
                 if (hasWorkbook) {
-                    ValidationReport(true, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Valid OpenXML XLSX")
+                    val hash = computeHash(file)
+                    ValidationReport(true, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Valid OpenXML XLSX", contentHash = hash)
                 } else {
                     ValidationReport(false, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Invalid XLSX: missing xl/workbook.xml")
                 }
@@ -151,7 +175,8 @@ object ArtifactValidator {
     private fun validateCsv(file: File): ValidationReport {
         val lines = file.readLines()
         return if (lines.isNotEmpty()) {
-            ValidationReport(true, "text/csv", "Valid CSV (${lines.size} rows)")
+            val hash = computeHash(file)
+            ValidationReport(true, "text/csv", "Valid CSV (${lines.size} rows)", contentHash = hash)
         } else {
             ValidationReport(false, "text/csv", "Empty CSV file")
         }
@@ -161,7 +186,8 @@ object ArtifactValidator {
         val content = file.readText().trim()
         val isValid = (content.startsWith("{") && content.endsWith("}")) ||
                 (content.startsWith("[") && content.endsWith("]"))
-        return ValidationReport(isValid, "application/json", if (isValid) "Valid JSON content" else "Malformed JSON brackets")
+        val hash = if (isValid) computeHash(file) else null
+        return ValidationReport(isValid, "application/json", if (isValid) "Valid JSON content" else "Malformed JSON brackets", contentHash = hash)
     }
 
     private fun validateText(file: File, ext: String): ValidationReport {
@@ -174,10 +200,15 @@ object ArtifactValidator {
             else -> "text/plain"
         }
         val length = file.length()
-        return ValidationReport(length > 0, mime, "Valid source/text ($length bytes)")
+        val isValid = length > 0
+        val hash = if (isValid) computeHash(file) else null
+        return ValidationReport(isValid, mime, "Valid source/text ($length bytes)", contentHash = hash)
     }
 
     private fun validateGeneric(file: File): ValidationReport {
-        return ValidationReport(file.length() > 0, "application/octet-stream", "Generic binary/file (${file.length()} bytes)")
+        val length = file.length()
+        val isValid = length > 0
+        val hash = if (isValid) computeHash(file) else null
+        return ValidationReport(isValid, "application/octet-stream", "Generic binary/file ($length bytes)", contentHash = hash)
     }
 }

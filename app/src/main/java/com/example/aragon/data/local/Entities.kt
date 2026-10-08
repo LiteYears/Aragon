@@ -267,14 +267,21 @@ data class ToolExecutionEntity(
     val artifacts: List<String> = emptyList()
 ) {
     fun toDomainResult(): ToolResult {
+        val isUnknownAfterDeath = status == "UNKNOWN_AFTER_PROCESS_DEATH" || (errorType == "PROCESS_TERMINATED" && exitCode == -1)
         val termReason = when {
-            errorType == "PROCESS_TERMINATED" && exitCode == -1 -> "PROCESS_DIED_BEFORE_RESULT"
+            isUnknownAfterDeath -> "PROCESS_DIED_BEFORE_RESULT"
             errorType == "AWAITING_APPROVAL" || status == "AWAITING_APPROVAL" -> "AWAITING_APPROVAL"
             errorType == "APPROVAL_DENIED" -> "APPROVAL_DENIED"
             status == "CANCELLED" -> "CANCELLED"
             else -> null
         }
         val isCancelled = status == "CANCELLED" || status == "AWAITING_APPROVAL"
+        val domainStatus = when {
+            isUnknownAfterDeath -> com.example.aragon.domain.model.ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH
+            isCancelled -> com.example.aragon.domain.model.ToolExecutionStatus.CANCELLED
+            success -> com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED
+            else -> com.example.aragon.domain.model.ToolExecutionStatus.FAILED
+        }
         return ToolResult(
             callId = callId,
             taskId = taskId,
@@ -293,8 +300,7 @@ data class ToolExecutionEntity(
             artifacts = artifacts,
             cancelled = isCancelled,
             terminationReason = termReason,
-            status = runCatching { com.example.aragon.domain.model.ToolExecutionStatus.valueOf(status) }
-                .getOrDefault(if (isCancelled) com.example.aragon.domain.model.ToolExecutionStatus.CANCELLED else if (success) com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED else com.example.aragon.domain.model.ToolExecutionStatus.FAILED)
+            status = domainStatus
         )
     }
 }

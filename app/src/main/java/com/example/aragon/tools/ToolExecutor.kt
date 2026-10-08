@@ -1164,7 +1164,8 @@ class ToolExecutor(
         val dummyTask = com.example.aragon.domain.model.Task(
             id = taskId,
             title = "Verification",
-            originalRequest = objective
+            originalRequest = objective,
+            createdAt = 0L
         )
         val result = verificationEngine.verifyTaskObjective(dummyTask, resolver)
 

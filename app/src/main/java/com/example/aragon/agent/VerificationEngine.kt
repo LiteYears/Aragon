@@ -101,7 +101,12 @@ class VerificationEngine {
         return list
     }
 
-    fun verifyTaskObjective(task: Task, resolver: WorkspacePathResolver): VerificationResult {
+    fun verifyTaskObjective(
+        task: Task,
+        resolver: WorkspacePathResolver,
+        registeredArtifacts: List<com.example.aragon.data.local.ArtifactEntity>? = null,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>? = null
+    ): VerificationResult {
         val checks = mutableListOf<VerificationCheck>()
         val request = task.originalRequest.lowercase()
         val criteria = deriveGoalCriteria(task).toMutableList()
@@ -110,11 +115,13 @@ class VerificationEngine {
         val expectedDocx = request.contains(".docx") || request.contains("docx") || request.contains("word document")
         if (expectedDocx) {
             val docxFiles = findFilesWithExtension(resolver, "docx")
-            val freshDocx = docxFiles.filter { isFreshArtifact(it, task) }
+            val freshDocxWithCheck = docxFiles.map { it to isFreshArtifact(it, task, resolver, registeredArtifacts, preExecutionBaseline) }
+            val freshDocx = freshDocxWithCheck.filter { it.second.first }.map { it.first }
 
             if (freshDocx.isEmpty()) {
                 if (docxFiles.isNotEmpty()) {
-                    checks.add(VerificationCheck("DOCX Freshness Check", false, "Pre-existing .docx file found (${docxFiles.first().name}), but it was created before this task began (${docxFiles.first().lastModified()} < ${task.createdAt}). Stale file cannot satisfy new task."))
+                    val details = freshDocxWithCheck.first().second.second
+                    checks.add(VerificationCheck("DOCX Freshness Check", false, details))
                 } else {
                     checks.add(VerificationCheck("DOCX File Existence", false, "No .docx document found in workspace or artifacts"))
                 }
@@ -135,11 +142,13 @@ class VerificationEngine {
         val expectedXlsx = request.contains(".xlsx") || request.contains("xlsx") || request.contains("spreadsheet") || request.contains("excel")
         if (expectedXlsx) {
             val xlsxFiles = findFilesWithExtension(resolver, "xlsx")
-            val freshXlsx = xlsxFiles.filter { isFreshArtifact(it, task) }
+            val freshXlsxWithCheck = xlsxFiles.map { it to isFreshArtifact(it, task, resolver, registeredArtifacts, preExecutionBaseline) }
+            val freshXlsx = freshXlsxWithCheck.filter { it.second.first }.map { it.first }
 
             if (freshXlsx.isEmpty()) {
                 if (xlsxFiles.isNotEmpty()) {
-                    checks.add(VerificationCheck("XLSX Freshness Check", false, "Pre-existing .xlsx file found (${xlsxFiles.first().name}), but it was created before this task began. Stale file cannot satisfy new task."))
+                    val details = freshXlsxWithCheck.first().second.second
+                    checks.add(VerificationCheck("XLSX Freshness Check", false, details))
                 } else {
                     checks.add(VerificationCheck("XLSX File Existence", false, "No .xlsx spreadsheet found in workspace or artifacts"))
                 }
@@ -155,11 +164,13 @@ class VerificationEngine {
         val expectedPdf = request.contains(".pdf") || request.contains("pdf")
         if (expectedPdf) {
             val pdfFiles = findFilesWithExtension(resolver, "pdf")
-            val freshPdf = pdfFiles.filter { isFreshArtifact(it, task) }
+            val freshPdfWithCheck = pdfFiles.map { it to isFreshArtifact(it, task, resolver, registeredArtifacts, preExecutionBaseline) }
+            val freshPdf = freshPdfWithCheck.filter { it.second.first }.map { it.first }
 
             if (freshPdf.isEmpty()) {
                 if (pdfFiles.isNotEmpty()) {
-                    checks.add(VerificationCheck("PDF Freshness Check", false, "Pre-existing .pdf file found (${pdfFiles.first().name}), but it was created before this task began. Stale file cannot satisfy new task."))
+                    val details = freshPdfWithCheck.first().second.second
+                    checks.add(VerificationCheck("PDF Freshness Check", false, details))
                 } else {
                     checks.add(VerificationCheck("PDF File Existence", false, "No .pdf document found in workspace or artifacts"))
                 }
@@ -175,10 +186,12 @@ class VerificationEngine {
         val expectedPython = request.contains(".py") || request.contains("python") || request.contains("script")
         if (expectedPython) {
             val pyFiles = findFilesWithExtension(resolver, "py")
-            val freshPy = pyFiles.filter { isFreshArtifact(it, task) }
+            val freshPyWithCheck = pyFiles.map { it to isFreshArtifact(it, task, resolver, registeredArtifacts, preExecutionBaseline) }
+            val freshPy = freshPyWithCheck.filter { it.second.first }.map { it.first }
             if (freshPy.isEmpty()) {
                 if (pyFiles.isNotEmpty()) {
-                    checks.add(VerificationCheck("Python Freshness Check", false, "Pre-existing .py file found (${pyFiles.first().name}), but it was created before this task began. Stale file cannot satisfy new task."))
+                    val details = freshPyWithCheck.first().second.second
+                    checks.add(VerificationCheck("Python Freshness Check", false, details))
                 } else {
                     checks.add(VerificationCheck("Python File Existence", false, "No .py file produced in workspace"))
                 }
@@ -208,11 +221,11 @@ class VerificationEngine {
             }
             val targetFile = findFileByName(resolver, targetName)
             val exists = targetFile != null && targetFile.length() > 0
-            val isFresh = targetFile != null && isFreshArtifact(targetFile, task)
-            val passed = exists && isFresh
+            val freshCheck = if (targetFile != null) isFreshArtifact(targetFile, task, resolver, registeredArtifacts, preExecutionBaseline) else Pair(false, "File not found")
+            val passed = exists && freshCheck.first
             val details = when {
                 !exists -> "File $targetName was not found or is empty"
-                !isFresh -> "File $targetName was created before this task began (${targetFile?.lastModified()} < ${task.createdAt}). Stale file cannot satisfy new task."
+                !freshCheck.first -> freshCheck.second
                 else -> "Fresh file verified (${targetFile?.length()} bytes)"
             }
             checks.add(
@@ -227,9 +240,9 @@ class VerificationEngine {
         // 6. Generic Deliverable Check:
         val allDiscoveredFiles = getAllWorkspaceFiles(resolver)
         val freshDeliverables = allDiscoveredFiles.filter { f ->
-            isFreshArtifact(f, task) && !f.name.startsWith(".") && f.extension.lowercase() in listOf(
+            !f.name.startsWith(".") && f.extension.lowercase() in listOf(
                 "docx", "xlsx", "pdf", "txt", "md", "csv", "json", "py", "sh", "html"
-            )
+            ) && isFreshArtifact(f, task, resolver, registeredArtifacts, preExecutionBaseline).first
         }
         val hasDeliverableArtifacts = freshDeliverables.isNotEmpty()
 
@@ -339,9 +352,57 @@ class VerificationEngine {
         }
     }
 
-    private fun isFreshArtifact(file: File, task: Task): Boolean {
-        if (!file.exists() || !file.isFile || file.length() == 0L) return false
-        // Allow a 5000ms grace window around task creation for clock skew / same-second start
-        return file.lastModified() >= (task.createdAt - 5000L)
+    private fun isFreshArtifact(
+        file: File,
+        task: Task,
+        resolver: WorkspacePathResolver,
+        registeredArtifacts: List<com.example.aragon.data.local.ArtifactEntity>?,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>?
+    ): Pair<Boolean, String> {
+        if (!file.exists() || !file.isFile || file.length() == 0L) {
+            return Pair(false, "File does not exist or is empty (0 bytes)")
+        }
+
+        val logicalPath = resolver.toLogicalPath(file)
+
+        // 1. Authoritative registered artifact ownership check
+        if (registeredArtifacts != null) {
+            val registered = registeredArtifacts.find {
+                it.logicalPath == logicalPath || resolver.resolve(it.logicalPath).canonicalPath == file.canonicalPath
+            }
+            if (registered != null && registered.valid && registered.sourceToolInvocationId != null && registered.size == file.length()) {
+                return Pair(true, "Verified task deliverable registered by tool invocation ${registered.sourceToolInvocationId} (${file.length()} bytes)")
+            }
+        }
+
+        // 2. Pre-execution baseline check: defense against pre-existing files
+        if (preExecutionBaseline != null) {
+            val baseline = preExecutionBaseline[logicalPath]
+            if (baseline != null) {
+                val sizeUnchanged = file.length() == baseline.size
+                val mtimeUnchanged = file.lastModified() == baseline.lastModified
+                if (sizeUnchanged && mtimeUnchanged) {
+                    val isHighValue = file.extension.lowercase() in listOf("docx", "xlsx", "pdf", "apk", "zip")
+                    val hash = if (isHighValue) ArtifactValidator.computeHash(file) else null
+                    if (hash == null || hash == baseline.contentHash) {
+                        return Pair(false, "Pre-existing file: '$logicalPath' existed before task execution (identical baseline size/timestamp/hash). Stale file cannot satisfy new task.")
+                    }
+                }
+            }
+        }
+
+        // 3. Timestamp modification boundary with clock-skew grace window
+        val isTimestampFresh = file.lastModified() >= (task.createdAt - 5000L)
+        if (!isTimestampFresh) {
+            return Pair(false, "Pre-existing file: created before this task began (${file.lastModified()} < ${task.createdAt}). Stale file cannot satisfy new task.")
+        }
+
+        // 4. Structural validation defense
+        val report = ArtifactValidator.validate(file)
+        if (!report.isValid) {
+            return Pair(false, "Invalid artifact structure: ${report.details}")
+        }
+
+        return Pair(true, "Fresh artifact validated (${file.length()} bytes)")
     }
 }

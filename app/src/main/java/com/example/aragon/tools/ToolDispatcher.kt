@@ -37,7 +37,10 @@ class ToolDispatcher(
             val prior = toolExecutionDao.getExecutionByCallId(toolCall.id)
             if (prior != null && prior.taskId == toolCall.taskId &&
                 (prior.toolName == toolCall.toolName || prior.toolName == canonicalToolName) &&
-                (prior.status == ToolExecutionStatus.SUCCEEDED.name || prior.status == ToolExecutionStatus.FAILED.name || prior.status == ToolExecutionStatus.CANCELLED.name)) {
+                (prior.status == ToolExecutionStatus.SUCCEEDED.name || 
+                 prior.status == ToolExecutionStatus.FAILED.name || 
+                 prior.status == ToolExecutionStatus.CANCELLED.name ||
+                 prior.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name)) {
                 val res = prior.toDomainResult()
                 onStatusChange?.invoke(res.status)
                 return@withContext res
@@ -309,13 +312,37 @@ class ToolDispatcher(
                 startedAt = startedAt,
                 completedAt = completedAt,
                 durationMs = if (result.durationMs > 0) result.durationMs else (completedAt - startedAt),
-                status = if (result.cancelled) ToolExecutionStatus.CANCELLED else if (result.success) ToolExecutionStatus.SUCCEEDED else ToolExecutionStatus.FAILED
+                status = when {
+                    result.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH -> ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH
+                    result.terminationReason == "PROCESS_DIED_BEFORE_RESULT" -> ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH
+                    result.cancelled -> ToolExecutionStatus.CANCELLED
+                    result.success -> ToolExecutionStatus.SUCCEEDED
+                    else -> ToolExecutionStatus.FAILED
+                }
             )
 
             onStatusChange?.invoke(finalResult.status)
             finalResult
         } finally {
             activeToolCallIds.remove("${toolCall.taskId}_${toolCall.id}")
+        }
+    }
+
+    companion object {
+        fun isIdempotentOperation(toolName: String, argumentsJson: String): Boolean {
+            val canonical = ToolRegistry.resolveCanonicalToolName(toolName)
+            if (canonical in listOf(
+                    "file_read", "file_list", "inspect_file", "search_files",
+                    "artifact_inspect", "web_search", "web_fetch",
+                    "json_query", "csv_analyze", "verify_objective"
+                )) {
+                return true
+            }
+            if (canonical == "http_request") {
+                val method = runCatching { JSONObject(argumentsJson).optString("method", "GET").uppercase() }.getOrDefault("GET")
+                return method == "GET" || method == "HEAD" || method == "OPTIONS"
+            }
+            return false
         }
     }
 }

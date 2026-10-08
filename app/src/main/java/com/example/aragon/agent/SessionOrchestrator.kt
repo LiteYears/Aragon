@@ -382,6 +382,9 @@ class SessionOrchestrator(
         // Genuinely new task if and only if no persisted plan steps, no prior tool executions, and iteration == 0
         val isFirstRun = planSteps.isEmpty() && priorExecutions.isEmpty() && task.iteration == 0
 
+        // Snapshot workspace state at start of execution to distinguish pre-existing files from fresh task deliverables
+        val preExecutionBaseline = artifactManager.snapshotWorkspace(resolver)
+
         try {
             if (isFirstRun) {
                 // ==========================================
@@ -439,13 +442,22 @@ class SessionOrchestrator(
                 )
             }
 
-            // PRE-EXECUTION CHECK: Is the goal already satisfied by existing workspace outputs?
-            val initialVerification = verificationEngine.verifyTaskObjective(task, resolver)
-            if (initialVerification.isVerified) {
-                logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Already Satisfied ✓", initialVerification.summary)
-                completeTask(task, initialVerification.summary, resolver, planSteps)
-                activeSessions.remove(taskId)
-                return
+            // PRE-EXECUTION CHECK: Only allowed if task is resuming with verified artifacts created by this task
+            val existingTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+            val hasPreviousExecutions = priorExecutions.isNotEmpty() || task.iteration > 0
+            if (hasPreviousExecutions && existingTaskArtifacts.any { it.valid && it.existsOnDisk }) {
+                val initialVerification = verificationEngine.verifyTaskObjective(
+                    task = task,
+                    resolver = resolver,
+                    registeredArtifacts = existingTaskArtifacts,
+                    preExecutionBaseline = preExecutionBaseline
+                )
+                if (initialVerification.isVerified) {
+                    logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Already Satisfied ✓", initialVerification.summary)
+                    completeTask(task, initialVerification.summary, resolver, planSteps)
+                    activeSessions.remove(taskId)
+                    return
+                }
             }
 
             // Check if task qualifies for Coordinator + Parallel Workers
@@ -472,12 +484,19 @@ class SessionOrchestrator(
                 for (zombie in zombies) {
                     toolExecutionDao.insertExecution(
                         zombie.copy(
-                            status = ToolExecutionStatus.FAILED.name,
+                            status = ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name,
                             exitCode = -1,
                             errorType = "PROCESS_TERMINATED",
                             errorMessage = "Host process died before tool result was observed (state was $statusName)",
                             completedAt = System.currentTimeMillis()
                         )
+                    )
+                    logEvent(
+                        taskId = taskId,
+                        type = TimelineEventType.STATUS_CHANGE,
+                        title = "Orphaned Execution Reconciled",
+                        details = "Tool invocation '${zombie.toolName}' (${zombie.callId}) was $statusName when host died. Transitioned to UNKNOWN_AFTER_PROCESS_DEATH (RESULT = NOT_OBSERVED).",
+                        toolCallId = zombie.callId
                     )
                 }
             }
@@ -486,13 +505,17 @@ class SessionOrchestrator(
             val persistedExecutions = toolExecutionDao.getRecentExecutions(taskId, 20).reversed()
             val recentToolResults = mutableListOf<Pair<String, ToolResult>>()
             for (pe in persistedExecutions) {
-                if (pe.status == ToolExecutionStatus.SUCCEEDED.name || pe.status == ToolExecutionStatus.FAILED.name || pe.status == ToolExecutionStatus.CANCELLED.name) {
+                if (pe.status == ToolExecutionStatus.SUCCEEDED.name || 
+                    pe.status == ToolExecutionStatus.FAILED.name || 
+                    pe.status == ToolExecutionStatus.CANCELLED.name ||
+                    pe.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name ||
+                    (pe.errorType == "PROCESS_TERMINATED" && pe.exitCode == -1)) {
                     recentToolResults.add(Pair(pe.toolName, pe.toDomainResult()))
                 }
             }
 
             // Reconcile disk deliverables into Room artifacts table immediately upon starting or resuming Phase 3
-            artifactManager.discoverArtifacts(taskId, resolver)
+            artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
 
             var loopWarning: String? = null
             var currentIteration = task.iteration
@@ -591,7 +614,10 @@ class SessionOrchestrator(
 
                 val verifiedArtifacts = toolResult.artifacts.filter { path ->
                     val f = resolver.resolve(path)
-                    f.exists() && f.isFile && f.length() > 0L && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
+                    if (!f.exists() || !f.isFile || f.length() == 0L) return@filter false
+                    val baseline = preExecutionBaseline[path]
+                    val wasModified = baseline == null || f.lastModified() != baseline.lastModified || f.length() != baseline.size
+                    wasModified && f.lastModified() >= (approvedToolCall.requestedAt - 2000L) && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
                 }
 
                 // Persist execution record immediately
@@ -624,7 +650,13 @@ class SessionOrchestrator(
                 for (createdPath in verifiedArtifacts) {
                     artifactManager.registerArtifactFromTool(taskId, createdPath, callId, resolver)
                 }
-                artifactManager.discoverArtifacts(taskId, resolver, activeToolInvocationId = callId)
+                artifactManager.discoverArtifacts(
+                    taskId = taskId,
+                    resolver = resolver,
+                    activeToolInvocationId = callId,
+                    executionStartTime = approvedToolCall.requestedAt,
+                    preExecutionBaseline = preExecutionBaseline
+                )
 
                 logEvent(
                     taskId = taskId,
@@ -669,17 +701,23 @@ class SessionOrchestrator(
                 taskDao.updateTask(TaskEntity.fromDomain(task))
 
                 // Refresh artifacts and steps
-                val artifacts = artifactManager.discoverArtifacts(taskId, resolver)
+                val artifacts = artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
                 planSteps = planStepDao.getStepsForTask(taskId).map { it.toDomain() }
 
                 // Check Deterministic Execution vs LLM Consultation
                 val apiKey = preferencesManager.nvidiaApiKey.value.trim()
                 if (apiKey.isBlank()) {
                     executeDeterministicStep(task, planSteps, resolver, currentIteration)
-                    val discovered = artifactManager.discoverArtifacts(taskId, resolver)
+                    val discovered = artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
 
-                    // Verify objective immediately
-                    val verification = verificationEngine.verifyTaskObjective(task, resolver)
+                    // Verify objective immediately with execution-scoped evidence
+                    val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                    val verification = verificationEngine.verifyTaskObjective(
+                        task = task,
+                        resolver = resolver,
+                        registeredArtifacts = currentTaskArtifacts,
+                        preExecutionBaseline = preExecutionBaseline
+                    )
                     if (verification.isVerified) {
                         logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", verification.summary)
                         completeTask(task, verification.summary, resolver, planSteps)
@@ -841,7 +879,10 @@ class SessionOrchestrator(
                         val priorExecution = toolExecutionDao.getExecutionByCallId(callId)
                         if (priorExecution != null && priorExecution.taskId == taskId && priorExecution.toolName == canonicalToolName &&
                             areArgumentsEqual(priorExecution.argumentsJson, tc.argumentsJson) &&
-                            (priorExecution.status == ToolExecutionStatus.SUCCEEDED.name || priorExecution.status == ToolExecutionStatus.FAILED.name || priorExecution.status == ToolExecutionStatus.CANCELLED.name)) {
+                            (priorExecution.status == ToolExecutionStatus.SUCCEEDED.name || 
+                             priorExecution.status == ToolExecutionStatus.FAILED.name || 
+                             priorExecution.status == ToolExecutionStatus.CANCELLED.name ||
+                             priorExecution.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name)) {
                             recentToolResults.add(Pair(canonicalToolName, priorExecution.toDomainResult()))
                             logEvent(
                                 taskId = taskId,
@@ -930,6 +971,18 @@ class SessionOrchestrator(
                                     break
                                 }
 
+                                // CRITICAL: UNKNOWN_AFTER_PROCESS_DEATH must NEVER be automatically retried
+                                if (toolResult.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
+                                    toolResult.terminationReason == "PROCESS_DIED_BEFORE_RESULT") {
+                                    break
+                                }
+
+                                // CRITICAL: Non-idempotent operations must NEVER be automatically retried on unconfirmed transient errors
+                                val isIdempotent = ToolDispatcher.isIdempotentOperation(canonicalToolName, tc.argumentsJson)
+                                if (!isIdempotent) {
+                                    break
+                                }
+
                                 val isTransient = toolResult.timedOut ||
                                     (toolResult.errorMessage.orEmpty() + " " + toolResult.stderr).let { err ->
                                         val lower = err.lowercase()
@@ -1010,7 +1063,10 @@ class SessionOrchestrator(
 
                         val verifiedArtifacts = toolResult.artifacts.filter { path ->
                             val f = resolver.resolve(path)
-                            f.exists() && f.isFile && f.length() > 0L && f.lastModified() >= (toolCall.requestedAt - 2000L) && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
+                            if (!f.exists() || !f.isFile || f.length() == 0L) return@filter false
+                            val baseline = preExecutionBaseline[path]
+                            val wasModified = baseline == null || f.lastModified() != baseline.lastModified || f.length() != baseline.size
+                            wasModified && f.lastModified() >= (toolCall.requestedAt - 2000L) && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
                         }
 
                         // 4. PERSIST TOOL EXECUTION RECORD
@@ -1052,7 +1108,13 @@ class SessionOrchestrator(
                         for (createdPath in verifiedArtifacts) {
                             artifactManager.registerArtifactFromTool(taskId, createdPath, callId, resolver)
                         }
-                        val currentDiscovered = artifactManager.discoverArtifacts(taskId, resolver, activeToolInvocationId = callId)
+                        val currentDiscovered = artifactManager.discoverArtifacts(
+                            taskId = taskId,
+                            resolver = resolver,
+                            activeToolInvocationId = callId,
+                            executionStartTime = toolCall.requestedAt,
+                            preExecutionBaseline = preExecutionBaseline
+                        )
 
                         // 6. TOOL COMPLETED EVENT
                         val completionSummary = if (toolResult.success) {
@@ -1086,7 +1148,13 @@ class SessionOrchestrator(
                         advancePlanStepProgress(taskId, canonicalToolName, tc.argumentsJson, toolResult.copy(artifacts = verifiedArtifacts), resolver, task)
 
                         // CRITICAL CHECK: DOES CURRENT EVIDENCE SATISFY THE GOAL?
-                        val postToolVerification = verificationEngine.verifyTaskObjective(task, resolver)
+                        val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                        val postToolVerification = verificationEngine.verifyTaskObjective(
+                            task = task,
+                            resolver = resolver,
+                            registeredArtifacts = currentTaskArtifacts,
+                            preExecutionBaseline = preExecutionBaseline
+                        )
                         if (postToolVerification.isVerified) {
                             val goalSummary = if (canonicalToolName == "complete_task") {
                                 runCatching { org.json.JSONObject(tc.argumentsJson).optString("summary", postToolVerification.summary) }.getOrDefault(postToolVerification.summary)
@@ -1185,7 +1253,13 @@ class SessionOrchestrator(
                     }
 
                     taskDao.updateStatus(taskId, TaskStatus.VERIFYING)
-                    val verification = verificationEngine.verifyTaskObjective(task, resolver)
+                    val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                    val verification = verificationEngine.verifyTaskObjective(
+                        task = task,
+                        resolver = resolver,
+                        registeredArtifacts = currentTaskArtifacts,
+                        preExecutionBaseline = preExecutionBaseline
+                    )
 
                     if (verification.isVerified) {
                         logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { verification.summary })
@@ -1418,7 +1492,12 @@ class SessionOrchestrator(
             4 -> {
                 // Phase 4: Deterministic Verification
                 // Can ONLY complete when VerificationEngine objectively verifies the objective!
-                val verification = verificationEngine.verifyTaskObjective(task, resolver)
+                val currentTaskArtifacts = artifactDao.getArtifactsForTask(task.id)
+                val verification = verificationEngine.verifyTaskObjective(
+                    task = task,
+                    resolver = resolver,
+                    registeredArtifacts = currentTaskArtifacts
+                )
                 if (verification.isVerified) {
                     planStepDao.updateStep(
                         activeStep.copy(

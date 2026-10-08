@@ -65,6 +65,18 @@ class Replanner {
             val (toolName, result) = lastFailure
             val err = (result.errorMessage.orEmpty() + " " + result.stderr).lowercase()
 
+            // 0. UNKNOWN_AFTER_PROCESS_DEATH: Must NEVER blindly retry
+            if (result.status == com.example.aragon.domain.model.ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
+                result.terminationReason == "PROCESS_DIED_BEFORE_RESULT") {
+                return ReplanDecision(
+                    type = ReplanDecisionType.CHANGE_STRATEGY,
+                    explanation = "Host process died before result of $toolName was observed. External side effects may have occurred. Do NOT blindly repeat tool execution. Reconcile workspace state first.",
+                    suggestedTool = "file_list",
+                    suggestedParameters = """{"path": "/workspace"}""",
+                    suggestedIntent = "RECONCILE_OR_INSPECT_FIRST: Inspect workspace/server state to verify if previous mutation occurred before process died."
+                )
+            }
+
             // A. TIMEOUTS: Apply exponential backoff and break operation into sub-steps
             if (result.timedOut || err.contains("timed out") || err.contains("timeout")) {
                 val attemptCount = failedApproaches.count { it.error.lowercase().contains("timeout") } + 1

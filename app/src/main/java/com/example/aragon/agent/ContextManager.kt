@@ -217,6 +217,7 @@ class ContextManager(
 
             val canonicalName = com.example.aragon.tools.ToolRegistry.resolveCanonicalToolName(callName)
             val terminalState = when {
+                result.status == com.example.aragon.domain.model.ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH -> "UNKNOWN_AFTER_PROCESS_DEATH"
                 result.errorType == "PROCESS_TERMINATED" && result.terminationReason == "PROCESS_DIED_BEFORE_RESULT" -> "UNKNOWN_AFTER_PROCESS_DEATH"
                 result.errorType == "PROCESS_TERMINATED" -> "PROCESS_TERMINATED"
                 result.status == com.example.aragon.domain.model.ToolExecutionStatus.AWAITING_APPROVAL || result.terminationReason == "AWAITING_APPROVAL" -> "AWAITING_APPROVAL"
@@ -254,7 +255,11 @@ class ContextManager(
                     appendLine("Error Message: ${result.errorMessage}")
                 }
                 if (terminalState == "UNKNOWN_AFTER_PROCESS_DEATH") {
-                    appendLine("Notice: Host process died before tool execution result was observed. State of external side-effects is unconfirmed.")
+                    appendLine("STATUS = UNKNOWN_AFTER_PROCESS_DEATH")
+                    appendLine("RESULT = NOT_OBSERVED")
+                    appendLine("RETRY = DO_NOT_BLINDLY_RETRY")
+                    appendLine("ACTION = RECONCILE_OR_INSPECT_FIRST")
+                    appendLine("Directive: Host process died before tool execution result was observed. External side effects (e.g. filesystem mutation, remote MCP call, sandbox command, or HTTP request) may have already taken effect. Do NOT blindly repeat non-idempotent mutations. Inspect current workspace/server state first (e.g. via file_list, inspect_file) to reconcile.")
                 }
                 if (result.artifacts.isNotEmpty()) {
                     appendLine("Artifacts Produced: ${result.artifacts.joinToString()}")

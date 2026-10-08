@@ -121,10 +121,11 @@ enum class ToolExecutionStatus {
     RUNNING,
     SUCCEEDED,
     FAILED,
-    CANCELLED;
+    CANCELLED,
+    UNKNOWN_AFTER_PROCESS_DEATH;
 
     val isTerminal: Boolean
-        get() = this == SUCCEEDED || this == FAILED || this == CANCELLED
+        get() = this == SUCCEEDED || this == FAILED || this == CANCELLED || this == UNKNOWN_AFTER_PROCESS_DEATH
 }
 
 data class Artifact(
@@ -181,7 +182,12 @@ data class ToolResult(
     val toolName: String = "",
     val argumentsJson: String = "{}",
     val environment: String = "LOCAL_COMPUTER",
-    val status: ToolExecutionStatus = if (cancelled) ToolExecutionStatus.CANCELLED else if (success) ToolExecutionStatus.SUCCEEDED else ToolExecutionStatus.FAILED
+    val status: ToolExecutionStatus = when {
+        terminationReason == "PROCESS_DIED_BEFORE_RESULT" || (errorType == "PROCESS_TERMINATED" && exitCode == -1) -> ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH
+        cancelled -> ToolExecutionStatus.CANCELLED
+        success -> ToolExecutionStatus.SUCCEEDED
+        else -> ToolExecutionStatus.FAILED
+    }
 ) {
     val toolCallId: String get() = callId
 }

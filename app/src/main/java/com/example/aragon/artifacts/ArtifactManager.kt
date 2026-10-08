@@ -9,11 +9,41 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import java.io.File
+
+data class FileSnapshot(
+    val logicalPath: String,
+    val size: Long,
+    val lastModified: Long,
+    val contentHash: String? = null
+)
 
 class ArtifactManager(
     private val artifactDao: ArtifactDao,
     private val detector: ArtifactDetector = ArtifactDetector()
 ) {
+
+    fun snapshotWorkspace(resolver: WorkspacePathResolver): Map<String, FileSnapshot> {
+        val map = mutableMapOf<String, FileSnapshot>()
+        val files = mutableListOf<File>()
+        if (resolver.workspaceDir.exists()) {
+            resolver.workspaceDir.walkTopDown()
+                .filter { it.isFile && !it.path.contains(".aragon") }
+                .forEach { files.add(it) }
+        }
+        if (resolver.artifactsDir.exists() && resolver.artifactsDir != resolver.workspaceDir) {
+            resolver.artifactsDir.walkTopDown()
+                .filter { it.isFile && !it.path.contains(".aragon") }
+                .forEach { files.add(it) }
+        }
+        for (f in files) {
+            val logical = resolver.toLogicalPath(f)
+            val isHighValue = f.extension.lowercase() in listOf("docx", "xlsx", "pdf", "apk", "zip")
+            val hash = if (isHighValue) ArtifactValidator.computeHash(f) else null
+            map[logical] = FileSnapshot(logical, f.length(), f.lastModified(), hash)
+        }
+        return map
+    }
 
     fun getArtifactsForTask(taskId: String): Flow<List<Artifact>> {
         return artifactDao.getArtifactsForTaskFlow(taskId).map { list ->
@@ -79,7 +109,9 @@ class ArtifactManager(
     suspend fun discoverArtifacts(
         taskId: String,
         resolver: WorkspacePathResolver,
-        activeToolInvocationId: String? = null
+        activeToolInvocationId: String? = null,
+        executionStartTime: Long = 0L,
+        preExecutionBaseline: Map<String, FileSnapshot> = emptyMap()
     ): List<Artifact> = withContext(Dispatchers.IO) {
         // Automatically sync any files created in OpenSandbox microVM into local workspace
         runCatching {
@@ -89,7 +121,6 @@ class ArtifactManager(
         val detected = detector.scan(taskId, resolver)
         val existingEntities = artifactDao.getArtifactsForTask(taskId)
         val existingMap = existingEntities.associateBy { it.logicalPath }
-        val detectedPaths = detected.map { it.logicalPath }.toSet()
 
         // 1. Reconcile missing or deleted files in database
         for (existing in existingEntities) {
@@ -112,6 +143,25 @@ class ArtifactManager(
         val result = mutableListOf<Artifact>()
         for (art in detected) {
             val existing = existingMap[art.logicalPath]
+            val baseline = preExecutionBaseline[art.logicalPath]
+
+            // If file existed in baseline and was completely untouched, it is an ambient pre-existing file
+            val isUntouchedBaseline = baseline != null &&
+                art.size == baseline.size &&
+                art.modifiedAt == baseline.lastModified &&
+                (baseline.contentHash == null || baseline.contentHash == ArtifactValidator.computeHash(resolver.resolve(art.logicalPath)))
+
+            // Untouched pre-existing files without prior task tool registration must not become task deliverables
+            if (isUntouchedBaseline && existing?.sourceToolInvocationId == null) {
+                continue
+            }
+
+            // Only attribute activeToolInvocationId if file was newly created or modified within invocation window
+            val wasModifiedByActiveTool = activeToolInvocationId != null &&
+                (existing == null || existing.modifiedAt != art.modifiedAt) &&
+                (executionStartTime == 0L || art.modifiedAt >= (executionStartTime - 2000L))
+
+            val toolInvocationId = existing?.sourceToolInvocationId ?: if (wasModifiedByActiveTool) activeToolInvocationId else null
 
             val entity = if (existing != null) {
                 existing.copy(
@@ -124,12 +174,12 @@ class ArtifactManager(
                     downloadable = art.existsOnDisk && art.valid,
                     existsOnDisk = art.existsOnDisk,
                     validationDetails = art.validationDetails,
-                    sourceToolInvocationId = existing.sourceToolInvocationId ?: activeToolInvocationId
+                    sourceToolInvocationId = toolInvocationId
                 )
             } else {
                 ArtifactEntity.fromDomain(
                     art.copy(
-                        sourceToolInvocationId = activeToolInvocationId
+                        sourceToolInvocationId = toolInvocationId
                     )
                 )
             }

@@ -68,6 +68,19 @@ class LoopDetector(
     }
 
     private fun evaluateLoop(toolName: String, sig: String, record: ActionRecord): LoopAnalysis {
+        // 0. Defense against re-executing unobserved process death without state reconciliation
+        if (history.size >= 2) {
+            val prev = history[history.size - 2]
+            if (prev.exitCode == -1 && prev.argsSignature == sig && !prev.success) {
+                return LoopAnalysis(
+                    isLooping = true,
+                    loopType = LoopType.EXACT_REPETITION,
+                    reason = "Attempted blind re-execution of tool '$toolName' whose previous execution outcome was unobserved (UNKNOWN_AFTER_PROCESS_DEATH) without prior state reconciliation.",
+                    recommendedAction = "RECONCILE_OR_INSPECT_FIRST"
+                )
+            }
+        }
+
         // 1. Exact Repetition Check (same tool and exact arguments repeated)
         val recentSame = history.takeLast(maxSameActions)
         if (recentSame.size >= maxSameActions && recentSame.all { it.argsSignature == sig }) {
