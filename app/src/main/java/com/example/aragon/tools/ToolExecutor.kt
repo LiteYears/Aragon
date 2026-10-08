@@ -24,6 +24,8 @@ class ToolExecutor(
         .build(),
     private val textEditorTool: TextEditorTool = TextEditorTool(),
     private val browserSession: com.example.aragon.computer.BrowserSession = com.example.aragon.computer.BrowserSession(okHttpClient),
+    private val playwrightEngine: PlaywrightEngine = PlaywrightEngine(okHttpClient),
+    private val mcpManager: com.example.aragon.mcp.McpManager = com.example.aragon.mcp.McpManager(okHttpClient),
     private val verificationEngine: com.example.aragon.agent.VerificationEngine = com.example.aragon.agent.VerificationEngine(),
     private val openSandboxManager: com.example.aragon.opensandbox.OpenSandboxManager? = null,
     private val preferencesManager: com.example.aragon.data.preferences.PreferencesManager? = null
@@ -45,6 +47,10 @@ class ToolExecutor(
                 "python_execute" -> executePython(callId, taskId, args, resolver, startTime)
                 "text_editor" -> executeTextEditor(callId, taskId, args, resolver)
                 "browser_action" -> executeBrowserAction(callId, taskId, args, resolver, startTime)
+                "playwright_browser" -> executePlaywright(callId, taskId, args, resolver, startTime)
+                "mcp_client" -> executeMcpClient(callId, taskId, args, resolver, startTime)
+                "mcp_manage" -> executeMcpManage(callId, taskId, args, resolver, startTime)
+                "file_patch", "edit_file" -> executeFilePatch(callId, taskId, args, resolver, startTime)
                 "verify_objective" -> executeVerifyObjective(callId, taskId, args, resolver, startTime)
                 "file_list" -> executeFileList(callId, taskId, args, resolver, startTime)
                 "file_read" -> executeFileRead(callId, taskId, args, resolver, startTime)
@@ -898,23 +904,15 @@ class ToolExecutor(
         resolver: WorkspacePathResolver,
         startTime: Long
     ): ToolResult = withContext(Dispatchers.IO) {
-        val query = args.optString("query", "")
-        val maxResults = args.optInt("maxResults", 5)
-
-        val results = buildString {
-            appendLine("Web Research Results for: \"$query\"")
-            appendLine("=========================================")
-            appendLine("1. DuckDuckGo Knowledge Summary: Primary facts regarding $query gathered via live search connection.")
-            appendLine("2. Source verified: Documentation, specifications, and reference records cross-checked.")
-            appendLine("3. Key findings: Contextual parameters and latest domain standards validated.")
-        }
+        val query = args.optString("query", args.optString("text", ""))
+        val searchOutput = playwrightEngine.performWebSearch(query)
 
         ToolResult(
             callId = callId,
             taskId = taskId,
             success = true,
             exitCode = 0,
-            stdout = results,
+            stdout = searchOutput,
             stderr = "",
             durationMs = System.currentTimeMillis() - startTime,
             workingDirectory = "/workspace"
@@ -1787,6 +1785,181 @@ OpenSandbox Resource Telemetry:
                 errorType = "ARCHIVE_ERROR"
             )
         }
+    }
+
+    private suspend fun executePlaywright(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver,
+        startTime: Long
+    ): ToolResult {
+        val action = args.optString("action", "navigate")
+        val url = args.optString("url", "").takeIf { it.isNotBlank() }
+        val selector = args.optString("selector", "").takeIf { it.isNotBlank() }
+        val text = args.optString("text", "").takeIf { it.isNotBlank() }
+        val script = args.optString("script", "").takeIf { it.isNotBlank() }
+        val outputPath = args.optString("outputPath", "").takeIf { it.isNotBlank() }
+        val waitFor = args.optString("waitFor", "").takeIf { it.isNotBlank() }
+
+        return playwrightEngine.execute(
+            callId = callId,
+            taskId = taskId,
+            action = action,
+            url = url,
+            selector = selector,
+            text = text,
+            script = script,
+            outputPath = outputPath,
+            waitFor = waitFor,
+            resolver = resolver
+        )
+    }
+
+    private suspend fun executeMcpClient(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver,
+        startTime: Long
+    ): ToolResult {
+        val toolName = args.optString("toolName", args.optString("name", ""))
+        val serverName = args.optString("serverName", "").takeIf { it.isNotBlank() }
+        val argumentsRaw = args.opt("arguments")
+        val argumentsJson = when (argumentsRaw) {
+            is JSONObject -> argumentsRaw
+            is String -> runCatching { JSONObject(argumentsRaw) }.getOrDefault(JSONObject())
+            else -> JSONObject()
+        }
+
+        return mcpManager.callTool(
+            serverName = serverName,
+            toolName = toolName,
+            arguments = argumentsJson,
+            callId = callId,
+            taskId = taskId,
+            resolver = resolver
+        )
+    }
+
+    private suspend fun executeMcpManage(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver,
+        startTime: Long
+    ): ToolResult {
+        val action = args.optString("action", "list_servers")
+        return when (action.lowercase()) {
+            "list_servers" -> {
+                val servers = mcpManager.listServers()
+                val output = buildString {
+                    appendLine("Active Model Context Protocol (MCP) Servers (${servers.size}):")
+                    appendLine("--------------------------------------------------")
+                    servers.forEach { s ->
+                        appendLine("• ${s.name} [Transport: ${s.transport.uppercase()}] - ${if (s.isConnected) "Connected ✓" else "Disconnected ✗"}")
+                        if (s.endpointUrl != null) appendLine("  Endpoint: ${s.endpointUrl}")
+                    }
+                }
+                ToolResult(
+                    callId = callId,
+                    taskId = taskId,
+                    success = true,
+                    exitCode = 0,
+                    stdout = output,
+                    stderr = "",
+                    durationMs = System.currentTimeMillis() - startTime,
+                    workingDirectory = "/workspace"
+                )
+            }
+            "list_tools" -> {
+                val serverName = args.optString("serverName", "").takeIf { it.isNotBlank() }
+                val tools = mcpManager.listTools(serverName)
+                val output = buildString {
+                    appendLine("Model Context Protocol (MCP) Discovered Tools (${tools.size}):")
+                    appendLine("--------------------------------------------------")
+                    tools.forEach { (srv, t) ->
+                        appendLine("• [${srv}] ${t.name}: ${t.description}")
+                    }
+                }
+                ToolResult(
+                    callId = callId,
+                    taskId = taskId,
+                    success = true,
+                    exitCode = 0,
+                    stdout = output,
+                    stderr = "",
+                    durationMs = System.currentTimeMillis() - startTime,
+                    workingDirectory = "/workspace"
+                )
+            }
+            "register_server" -> {
+                val srvName = args.optString("serverName", "")
+                val endpoint = args.optString("endpointUrl", "")
+                if (srvName.isBlank() || endpoint.isBlank()) {
+                    return ToolResult(
+                        callId = callId,
+                        taskId = taskId,
+                        success = false,
+                        exitCode = 1,
+                        stdout = "",
+                        stderr = "serverName and endpointUrl are required to register remote MCP server",
+                        durationMs = System.currentTimeMillis() - startTime,
+                        workingDirectory = "/workspace"
+                    )
+                }
+                mcpManager.registerRemoteServer(srvName, endpoint)
+                ToolResult(
+                    callId = callId,
+                    taskId = taskId,
+                    success = true,
+                    exitCode = 0,
+                    stdout = "Registered MCP remote server '$srvName' with endpoint '$endpoint'",
+                    stderr = "",
+                    durationMs = System.currentTimeMillis() - startTime,
+                    workingDirectory = "/workspace"
+                )
+            }
+            else -> ToolResult(
+                callId = callId,
+                taskId = taskId,
+                success = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "Unknown mcp_manage action: $action",
+                durationMs = System.currentTimeMillis() - startTime,
+                workingDirectory = "/workspace"
+            )
+        }
+    }
+
+    private fun executeFilePatch(
+        callId: String,
+        taskId: String,
+        args: JSONObject,
+        resolver: WorkspacePathResolver,
+        startTime: Long
+    ): ToolResult {
+        val op = args.optString("operation", "replace")
+        val path = args.optString("path", args.optString("filePath", ""))
+        val content = args.optString("content", "").takeIf { it.isNotBlank() }
+        val targetContent = args.optString("targetContent", args.optString("old_str", "")).takeIf { it.isNotBlank() }
+        val replacementContent = args.optString("replacementContent", args.optString("new_str", "")).takeIf { it.isNotBlank() }
+        val startLine = if (args.has("startLine")) args.optInt("startLine") else null
+        val lineCount = if (args.has("lineCount")) args.optInt("lineCount") else null
+
+        return textEditorTool.execute(
+            callId = callId,
+            taskId = taskId,
+            operation = op,
+            path = path,
+            content = content,
+            targetContent = targetContent,
+            replacementContent = replacementContent,
+            startLine = startLine,
+            lineCount = lineCount,
+            resolver = resolver
+        )
     }
 }
 

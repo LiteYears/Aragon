@@ -47,15 +47,22 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.ListAlt
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -520,100 +527,6 @@ private fun WorkspaceSegmentTab(
 }
 
 @Composable
-private fun ExecutionFeedView(
-    task: Task,
-    timeline: List<TimelineEvent>,
-    filter: FeedFilter,
-    onFilterChange: (FeedFilter) -> Unit,
-    onApprovePlan: () -> Unit,
-    onCancel: () -> Unit,
-    listState: LazyListState
-) {
-    val filteredTimeline = remember(timeline, filter) {
-        when (filter) {
-            FeedFilter.ALL -> timeline
-            FeedFilter.ACTIONS -> timeline.filter { it.type == TimelineEventType.ACTION || it.type == TimelineEventType.TOOL_EXECUTION }
-            FeedFilter.OBSERVATIONS -> timeline.filter { it.type == TimelineEventType.OBSERVATION || it.type == TimelineEventType.VERIFICATION }
-            FeedFilter.DECISIONS -> timeline.filter { it.type == TimelineEventType.REASONING || it.type == TimelineEventType.DECISION || it.type == TimelineEventType.PLANNING || it.type == TimelineEventType.REPLAN }
-        }
-    }
-
-    LazyColumn(
-        state = listState,
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp)
-            .testTag("execution_feed_list")
-    ) {
-        // Feed Filter Chips
-        item {
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                FeedFilterChip(label = "All", count = timeline.size, selected = filter == FeedFilter.ALL, onClick = { onFilterChange(FeedFilter.ALL) })
-                FeedFilterChip(label = "Actions", count = timeline.count { it.type == TimelineEventType.ACTION || it.type == TimelineEventType.TOOL_EXECUTION }, selected = filter == FeedFilter.ACTIONS, onClick = { onFilterChange(FeedFilter.ACTIONS) })
-                FeedFilterChip(label = "Observations", count = timeline.count { it.type == TimelineEventType.OBSERVATION || it.type == TimelineEventType.VERIFICATION }, selected = filter == FeedFilter.OBSERVATIONS, onClick = { onFilterChange(FeedFilter.OBSERVATIONS) })
-                FeedFilterChip(label = "Decisions", count = timeline.count { it.type == TimelineEventType.REASONING || it.type == TimelineEventType.DECISION || it.type == TimelineEventType.PLANNING }, selected = filter == FeedFilter.DECISIONS, onClick = { onFilterChange(FeedFilter.DECISIONS) })
-            }
-            Spacer(modifier = Modifier.height(10.dp))
-        }
-
-        // Approval Gate Card (if waiting)
-        if (task.status == TaskStatus.WAITING_FOR_USER || task.status == TaskStatus.AWAITING_PLAN_APPROVAL || task.status == TaskStatus.AWAITING_APPROVAL) {
-            item {
-                PlanApprovalCard(
-                    isDangerousAction = task.status == TaskStatus.AWAITING_APPROVAL,
-                    onApprove = onApprovePlan,
-                    onCancel = onCancel
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-        }
-
-        if (filteredTimeline.isEmpty()) {
-            item {
-                Surface(
-                    color = AmoledCard,
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, AmoledBorder),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(20.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Terminal,
-                            contentDescription = null,
-                            tint = AmoledTextMuted,
-                            modifier = Modifier.size(24.dp)
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = if (timeline.isEmpty()) "Initializing autonomous agent pipeline..." else "No events matching current filter",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = AmoledTextSecondary
-                        )
-                    }
-                }
-            }
-        } else {
-            // Render latest events first or top-down
-            items(filteredTimeline.reversed(), key = { it.id }) { event ->
-                ExecutionEventCard(event = event)
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-        }
-
-        item {
-            Spacer(modifier = Modifier.height(32.dp))
-        }
-    }
-}
-
-@Composable
 private fun FeedFilterChip(
     label: String,
     count: Int,
@@ -649,163 +562,533 @@ private fun FeedFilterChip(
 }
 
 @Composable
-private fun ExecutionEventCard(event: TimelineEvent) {
-    var isExpanded by remember { mutableStateOf(false) }
-
-    // Distinct styling based on semantic event type
-    val isObservation = event.type == TimelineEventType.OBSERVATION
-    val isDecision = event.type == TimelineEventType.REASONING || event.type == TimelineEventType.DECISION
-    val isAction = event.type == TimelineEventType.ACTION || event.type == TimelineEventType.TOOL_EXECUTION
-    val isGoalCompleted = event.type == TimelineEventType.GOAL_COMPLETED || event.type == TimelineEventType.TASK_COMPLETED
-    val isError = event.type == TimelineEventType.ERROR
-    val isReplan = event.type == TimelineEventType.REPLAN
-
-    val borderColor = when {
-        isGoalCompleted -> AmoledSuccess
-        isObservation -> AmoledSuccess.copy(alpha = 0.5f)
-        isDecision -> Color(0xFFA855F7).copy(alpha = 0.5f)
-        isAction -> AmoledAccent.copy(alpha = 0.5f)
-        isError -> AmoledError
-        isReplan -> AmoledWarning
-        else -> AmoledBorder
+private fun ExecutionFeedView(
+    task: Task,
+    timeline: List<TimelineEvent>,
+    filter: FeedFilter,
+    onFilterChange: (FeedFilter) -> Unit,
+    onApprovePlan: () -> Unit,
+    onCancel: () -> Unit,
+    listState: LazyListState
+) {
+    val filteredTimeline = remember(timeline, filter) {
+        when (filter) {
+            FeedFilter.ALL -> timeline
+            FeedFilter.ACTIONS -> timeline.filter { it.type == TimelineEventType.ACTION || it.type == TimelineEventType.TOOL_EXECUTION }
+            FeedFilter.OBSERVATIONS -> timeline.filter { it.type == TimelineEventType.OBSERVATION || it.type == TimelineEventType.VERIFICATION }
+            FeedFilter.DECISIONS -> timeline.filter { it.type == TimelineEventType.REASONING || it.type == TimelineEventType.DECISION || it.type == TimelineEventType.PLANNING || it.type == TimelineEventType.REPLAN }
+        }
     }
 
-    val cardBg = when {
-        isGoalCompleted -> AmoledSuccess.copy(alpha = 0.08f)
-        isObservation -> AmoledSurface
-        isDecision -> Color(0xFF1E1428)
-        isError -> AmoledError.copy(alpha = 0.08f)
-        else -> AmoledCard
-    }
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = cardBg),
-        shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, borderColor),
+    LazyColumn(
+        state = listState,
         modifier = Modifier
-            .fillMaxWidth()
-            .animateContentSize(animationSpec = tween(220, easing = FastOutSlowInEasing))
-            .clickable { if (event.details.isNotBlank()) isExpanded = !isExpanded }
+            .fillMaxSize()
+            .padding(horizontal = 14.dp)
+            .testTag("execution_feed_list")
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        // Feed Filter Chips
+        item {
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FeedFilterChip(label = "All", count = timeline.size, selected = filter == FeedFilter.ALL, onClick = { onFilterChange(FeedFilter.ALL) })
+                FeedFilterChip(label = "Actions", count = timeline.count { it.type == TimelineEventType.ACTION || it.type == TimelineEventType.TOOL_EXECUTION }, selected = filter == FeedFilter.ACTIONS, onClick = { onFilterChange(FeedFilter.ACTIONS) })
+                FeedFilterChip(label = "Observations", count = timeline.count { it.type == TimelineEventType.OBSERVATION || it.type == TimelineEventType.VERIFICATION }, selected = filter == FeedFilter.OBSERVATIONS, onClick = { onFilterChange(FeedFilter.OBSERVATIONS) })
+                FeedFilterChip(label = "Decisions", count = timeline.count { it.type == TimelineEventType.REASONING || it.type == TimelineEventType.DECISION || it.type == TimelineEventType.PLANNING }, selected = filter == FeedFilter.DECISIONS, onClick = { onFilterChange(FeedFilter.DECISIONS) })
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        // Active Agent Working Pod (Stacked Head Unit)
+        if (task.status == TaskStatus.EXECUTING || task.status == TaskStatus.PLANNING || task.status == TaskStatus.REPLANNING || task.status == TaskStatus.VERIFYING) {
+            item {
+                ActiveAgentWorkingPod(task = task, latestEvent = timeline.lastOrNull())
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+        }
+
+        // Approval Gate Card (if waiting)
+        if (task.status == TaskStatus.WAITING_FOR_USER || task.status == TaskStatus.AWAITING_PLAN_APPROVAL || task.status == TaskStatus.AWAITING_APPROVAL) {
+            item {
+                PlanApprovalCard(
+                    isDangerousAction = task.status == TaskStatus.AWAITING_APPROVAL,
+                    onApprove = onApprovePlan,
+                    onCancel = onCancel
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+        }
+
+        if (filteredTimeline.isEmpty()) {
+            item {
+                Surface(
+                    color = AmoledCard,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, AmoledBorder),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Terminal,
+                            contentDescription = null,
+                            tint = AmoledAccent.copy(alpha = 0.7f),
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = if (timeline.isEmpty()) "Initializing Autonomous Tool Execution Pipeline..." else "No events matching current filter",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AmoledTextSecondary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        } else {
+            // Render stacked boxes from newest to oldest with connected conduits
+            val reversedItems = filteredTimeline.reversed()
+            items(reversedItems, key = { it.id }) { event ->
+                val indexInList = filteredTimeline.indexOf(event)
+                val isLatest = event.id == timeline.lastOrNull()?.id
+                StackedExecutionBox(
+                    event = event,
+                    boxIndex = indexInList + 1,
+                    totalBoxes = filteredTimeline.size,
+                    isLatest = isLatest
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(40.dp))
+        }
+    }
+}
+
+@Composable
+private fun ActiveAgentWorkingPod(task: Task, latestEvent: TimelineEvent?) {
+    val infiniteTransition = rememberInfiniteTransition(label = "agent_working_glow")
+    val glowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glow_alpha"
+    )
+
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 1.15f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse_scale"
+    )
+
+    Surface(
+        color = Color(0xFF0D141C),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.5.dp, AmoledAccent.copy(alpha = glowAlpha)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Semantic Stage Badge Icon
-                val (stageColor, stageIcon, stageLabel) = when {
-                    isGoalCompleted -> Triple(AmoledSuccess, Icons.Default.CheckCircle, "GOAL ACHIEVED")
-                    isObservation -> Triple(AmoledSuccess, Icons.Default.Visibility, "OBSERVATION")
-                    isDecision -> Triple(Color(0xFFA855F7), Icons.Default.Lightbulb, "DECISION")
-                    isAction -> Triple(AmoledAccent, Icons.Default.Code, "ACTION")
-                    isError -> Triple(AmoledError, Icons.Default.Error, "FAILURE / LOOP")
-                    isReplan -> Triple(AmoledWarning, Icons.Default.Refresh, "REPLAN")
-                    else -> Triple(AmoledTextMuted, Icons.Default.Terminal, event.type.name)
-                }
+                // Pulsating radar dot
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .background(AmoledAccent.copy(alpha = glowAlpha), CircleShape)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "AGENT COMPUTE ACTIVE",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = AmoledAccent,
+                    fontSize = 10.sp,
+                    letterSpacing = 1.sp
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
 
                 Surface(
-                    color = stageColor.copy(alpha = 0.15f),
-                    shape = RoundedCornerShape(4.dp),
-                    border = BorderStroke(0.5.dp, stageColor.copy(alpha = 0.5f))
+                    color = AmoledElevated,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(0.5.dp, AmoledBorder)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = stageIcon,
+                            imageVector = Icons.Default.Speed,
                             contentDescription = null,
-                            tint = stageColor,
+                            tint = AmoledTextMuted,
                             modifier = Modifier.size(11.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = stageLabel,
-                            color = stageColor,
+                            text = task.status.name,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            color = AmoledTextSecondary
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Active subtask / tool banner
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = AmoledAccent,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = latestEvent?.title ?: "Executing autonomous strategy...",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AmoledTextPrimary,
+                    maxLines = 1
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Animated scanning progress strip
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp)),
+                color = AmoledAccent,
+                trackColor = AmoledSurface
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Memory,
+                        contentDescription = null,
+                        tint = AmoledTextMuted,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "OpenSandbox Substrate: Active",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        color = AmoledTextMuted
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Lan,
+                        contentDescription = null,
+                        tint = AmoledTextMuted,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "MCP & Playwright: Ready",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        color = AmoledTextMuted
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StackedExecutionBox(
+    event: TimelineEvent,
+    boxIndex: Int,
+    totalBoxes: Int,
+    isLatest: Boolean
+) {
+    var isExpanded by remember { mutableStateOf(false) }
+    val clipboardManager = LocalClipboardManager.current
+
+    // Semantic status styling
+    val isGoalCompleted = event.type == TimelineEventType.GOAL_COMPLETED || event.type == TimelineEventType.TASK_COMPLETED
+    val isObservation = event.type == TimelineEventType.OBSERVATION
+    val isDecision = event.type == TimelineEventType.REASONING || event.type == TimelineEventType.DECISION
+    val isAction = event.type == TimelineEventType.ACTION || event.type == TimelineEventType.TOOL_EXECUTION
+    val isError = event.type == TimelineEventType.ERROR
+    val isReplan = event.type == TimelineEventType.REPLAN
+
+    val accentColor = when {
+        isGoalCompleted -> AmoledSuccess
+        isObservation -> Color(0xFF10B981) // emerald
+        isDecision -> Color(0xFFA855F7) // purple
+        isAction -> Color(0xFF38BDF8) // cyan/accent
+        isError -> AmoledError
+        isReplan -> AmoledWarning
+        else -> AmoledTextMuted
+    }
+
+    val boxBg = when {
+        isGoalCompleted -> Color(0xFF091C12)
+        isDecision -> Color(0xFF181024)
+        isError -> Color(0xFF200D11)
+        isLatest -> Color(0xFF0C131B)
+        else -> AmoledCard
+    }
+
+    val borderStrokeColor = if (isLatest) {
+        accentColor.copy(alpha = 0.85f)
+    } else {
+        accentColor.copy(alpha = 0.25f)
+    }
+
+    // Stacked Container with Left Pipeline Conduit
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top
+    ) {
+        // Left Conduit Track with Connecting Dot
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier
+                .width(24.dp)
+                .padding(top = 10.dp)
+        ) {
+            // Node pip
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(accentColor, CircleShape)
+            )
+            // Vertical connecting line
+            Box(
+                modifier = Modifier
+                    .width(2.dp)
+                    .height(48.dp)
+                    .background(accentColor.copy(alpha = 0.2f))
+            )
+        }
+
+        Spacer(modifier = Modifier.width(4.dp))
+
+        // Stacked Box Pod
+        Surface(
+            color = boxBg,
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(1.2.dp, borderStrokeColor),
+            modifier = Modifier
+                .weight(1f)
+                .animateContentSize(animationSpec = tween(200, easing = FastOutSlowInEasing))
+                .clickable { if (event.details.isNotBlank()) isExpanded = !isExpanded }
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                // Top Header Strip of the Box
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Box Index Pill (e.g. BOX #04)
+                    Surface(
+                        color = AmoledSurface,
+                        shape = RoundedCornerShape(4.dp),
+                        border = BorderStroke(0.5.dp, AmoledBorder)
+                    ) {
+                        Text(
+                            text = "BOX #${boxIndex.toString().padStart(2, '0')}",
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 9.sp
+                            fontSize = 8.5.sp,
+                            color = AmoledTextSecondary,
+                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Semantic Stage Badge
+                    val (stageIcon, stageLabel) = when {
+                        isGoalCompleted -> Pair(Icons.Default.CheckCircle, "VERIFIED")
+                        isObservation -> Pair(Icons.Default.Visibility, "OBSERVATION")
+                        isDecision -> Pair(Icons.Default.Lightbulb, "DECISION")
+                        isAction -> Pair(Icons.Default.Code, "ACTION")
+                        isError -> Pair(Icons.Default.Error, "ERROR")
+                        isReplan -> Pair(Icons.Default.Refresh, "REPLAN")
+                        else -> Pair(Icons.Default.Terminal, event.type.name)
+                    }
+
+                    Surface(
+                        color = accentColor.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(4.dp),
+                        border = BorderStroke(0.5.dp, accentColor.copy(alpha = 0.4f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = stageIcon,
+                                contentDescription = null,
+                                tint = accentColor,
+                                modifier = Modifier.size(10.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = stageLabel,
+                                color = accentColor,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 8.5.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    // Duration badge
+                    if (event.durationMs != null) {
+                        Text(
+                            text = "${event.durationMs}ms",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            color = AmoledTextMuted
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                    }
+
+                    // Expand indicator
+                    if (event.details.isNotBlank()) {
+                        val rotation by animateFloatAsState(
+                            targetValue = if (isExpanded) 180f else 0f,
+                            animationSpec = tween(180),
+                            label = "box_expand_rot"
+                        )
+                        Icon(
+                            imageVector = Icons.Default.ExpandMore,
+                            contentDescription = "Toggle Details",
+                            tint = AmoledTextMuted,
+                            modifier = Modifier
+                                .size(15.dp)
+                                .rotate(rotation)
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
 
-                // Title
+                // Box Title
                 Text(
                     text = event.title,
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Bold,
                     color = AmoledTextPrimary,
-                    modifier = Modifier.weight(1f),
-                    maxLines = if (isExpanded) 4 else 1
+                    fontFamily = if (isAction || isObservation) FontFamily.Monospace else FontFamily.Default,
+                    maxLines = if (isExpanded) 4 else 2
                 )
 
-                if (event.durationMs != null) {
+                // Compact Single-Line Preview if not expanded
+                if (!isExpanded && event.details.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    val preview = event.details.lineSequence().firstOrNull { it.isNotBlank() }?.take(120) ?: ""
                     Text(
-                        text = "${event.durationMs}ms",
+                        text = preview,
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
+                        color = AmoledTextSecondary,
                         fontSize = 10.sp,
-                        color = AmoledTextMuted
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                }
-
-                if (event.details.isNotBlank()) {
-                    val rotation by animateFloatAsState(
-                        targetValue = if (isExpanded) 180f else 0f,
-                        animationSpec = tween(180),
-                        label = "expand_rot"
-                    )
-                    Icon(
-                        imageVector = Icons.Default.ExpandMore,
-                        contentDescription = "Toggle Details",
-                        tint = AmoledTextMuted,
-                        modifier = Modifier
-                            .size(16.dp)
-                            .rotate(rotation)
+                        maxLines = 1
                     )
                 }
-            }
 
-            // Compact Preview for Observation / Action if not expanded
-            if (!isExpanded && event.details.isNotBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = event.details.lineSequence().firstOrNull { it.isNotBlank() } ?: "",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontFamily = if (isAction || isObservation) FontFamily.Monospace else FontFamily.Default,
-                    color = AmoledTextSecondary,
-                    maxLines = 1,
-                    fontSize = 11.sp
-                )
-            }
+                // Expanded Terminal / Output Compartment
+                AnimatedVisibility(
+                    visible = isExpanded && event.details.isNotBlank(),
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Column(modifier = Modifier.padding(top = 8.dp)) {
+                        HorizontalDivider(color = AmoledBorder, thickness = 0.5.dp)
+                        Spacer(modifier = Modifier.height(6.dp))
 
-            // Full Expanded Content
-            AnimatedVisibility(
-                visible = isExpanded && event.details.isNotBlank(),
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                Column(modifier = Modifier.padding(top = 10.dp)) {
-                    HorizontalDivider(color = AmoledBorder, thickness = 0.5.dp)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Surface(
-                        color = AmoledElevated,
-                        shape = RoundedCornerShape(6.dp),
-                        border = BorderStroke(1.dp, AmoledBorder),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = event.details,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            color = AmoledTextSecondary,
-                            modifier = Modifier.padding(10.dp)
-                        )
+                        // Terminal Box with Copy Button
+                        Surface(
+                            color = AmoledElevated,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, AmoledBorder),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "EXECUTION TRACE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 8.5.sp,
+                                        color = AmoledTextMuted,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            clipboardManager.setText(AnnotatedString(event.details))
+                                        },
+                                        modifier = Modifier.size(20.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "Copy Trace",
+                                            tint = AmoledTextMuted,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = event.details,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.5.sp,
+                                    color = AmoledTextSecondary
+                                )
+                            }
+                        }
                     }
                 }
             }

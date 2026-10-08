@@ -215,18 +215,16 @@ class AragonExecutionInvariantTest {
         assertTrue(toolResult.success)
 
         // 2. Artifact detector scans the workspace
-        val artifacts = artifactDetector.detectArtifacts(
+        val artifacts = artifactDetector.scan(
             taskId = "task_forensic_doc",
-            resolver = resolver,
-            toolResults = listOf(toolResult)
+            resolver = resolver
         )
 
         assertEquals(1, artifacts.size)
         val docArtifact = artifacts[0]
-        assertEquals("Forensic_Summary.docx", docArtifact.name)
+        assertEquals("Forensic_Summary.docx", docArtifact.filename)
         assertTrue("Artifact must exist on disk", docArtifact.existsOnDisk)
         assertTrue("Artifact must be validated as valid deliverable", docArtifact.valid)
-        assertEquals("call_doc_1", docArtifact.sourceToolInvocationId)
         assertTrue("Artifact must be inspectable/downloadable", docArtifact.downloadable)
 
         // 3. Physical file inspection

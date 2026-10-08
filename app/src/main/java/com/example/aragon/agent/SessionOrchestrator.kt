@@ -324,25 +324,59 @@ class SessionOrchestrator(
                             toolCallId = callId
                         )
 
-                        // 3. EXECUTION
-                        val toolResult = toolDispatcher.dispatch(
-                            toolCall = toolCall,
-                            resolver = resolver,
-                            autonomyLevel = preferencesManager.autonomyLevel.value,
-                            onStatusChange = { status ->
-                                if (status == com.example.aragon.domain.model.ToolExecutionStatus.RUNNING) {
-                                    sessionScope.launch {
-                                        logEvent(
-                                            taskId = taskId,
-                                            type = TimelineEventType.TOOL_STARTED,
-                                            title = "Tool Running: ${tc.name}",
-                                            details = "Process started in environment",
-                                            toolCallId = callId
-                                        )
+                        // 3. EXECUTION WITH RESILIENT RETRY & EXPONENTIAL BACKOFF
+                        var currentAttempt = 0
+                        val maxTransientRetries = 2
+                        var toolResult: ToolResult
+
+                        while (true) {
+                            toolResult = toolDispatcher.dispatch(
+                                toolCall = toolCall,
+                                resolver = resolver,
+                                autonomyLevel = preferencesManager.autonomyLevel.value,
+                                onStatusChange = { status ->
+                                    if (status == com.example.aragon.domain.model.ToolExecutionStatus.RUNNING) {
+                                        sessionScope.launch {
+                                            logEvent(
+                                                taskId = taskId,
+                                                type = TimelineEventType.TOOL_STARTED,
+                                                title = "Tool Running: ${tc.name}${if (currentAttempt > 0) " (Retry #$currentAttempt)" else ""}",
+                                                details = "Process started in environment",
+                                                toolCallId = callId
+                                            )
+                                        }
                                     }
                                 }
+                            )
+
+                            if (toolResult.success || currentAttempt >= maxTransientRetries) {
+                                break
                             }
-                        )
+
+                            val isTransient = toolResult.timedOut ||
+                                (toolResult.errorMessage.orEmpty() + " " + toolResult.stderr).let { err ->
+                                    val lower = err.lowercase()
+                                    lower.contains("timeout") || lower.contains("timed out") ||
+                                    lower.contains("429") || lower.contains("rate limit") ||
+                                    lower.contains("busy") || lower.contains("eagain") ||
+                                    lower.contains("connection reset") || lower.contains("socket closed")
+                                }
+
+                            if (!isTransient) {
+                                break
+                            }
+
+                            currentAttempt++
+                            val backoffDelayMs = (400L * (1L shl currentAttempt)) + (50..200).random()
+                            logEvent(
+                                taskId = taskId,
+                                type = TimelineEventType.REPLAN,
+                                title = "Transient Failure: ${tc.name}",
+                                details = "Encountered transient error (${toolResult.errorType ?: "TIMEOUT/BUSY"}). Applying exponential backoff (${backoffDelayMs}ms) before retry $currentAttempt of $maxTransientRetries...",
+                                toolCallId = callId
+                            )
+                            delay(backoffDelayMs)
+                        }
 
                         // Check if tool is waiting for human approval
                         if (toolResult.cancelled && toolResult.terminationReason == "AWAITING_APPROVAL") {

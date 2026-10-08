@@ -7,11 +7,14 @@ import com.example.aragon.domain.model.PlanStep
 import com.example.aragon.domain.model.StepStatus
 import com.example.aragon.domain.model.Task
 import com.example.aragon.domain.model.ToolResult
+import org.json.JSONObject
 
 enum class ReplanDecisionType {
     CONTINUE_CURRENT_STEP,
     REPAIR_CURRENT_STEP,
     CHANGE_STRATEGY,
+    EXPONENTIAL_BACKOFF,
+    FALLBACK_BUILTIN,
     SKIP_STEP,
     REQUEST_USER_INPUT,
     ABORT,
@@ -24,9 +27,16 @@ data class ReplanDecision(
     val suggestedTool: String? = null,
     val suggestedParameters: String? = null,
     val updatedSteps: List<PlanStep>? = null,
-    val suggestedIntent: String? = null
+    val suggestedIntent: String? = null,
+    val backoffDelayMs: Long = 0L
 )
 
+/**
+ * Intelligent execution plan resilience engine.
+ * Diagnoses root causes of command and tool failures, detects timeout and rate limit patterns,
+ * applies exponential backoff, switches strategies away from broken dependencies to native generators,
+ * and recovers file editing mistakes without infinite loops.
+ */
 class Replanner {
 
     fun analyzeAndReplan(
@@ -50,55 +60,120 @@ class Replanner {
         val lastFailure = recentResults.lastOrNull { !it.second.success }
         val activeStep = currentPlan.find { it.status == StepStatus.IN_PROGRESS || it.status == StepStatus.PENDING }
 
-        // 2. Check if a Python or command failure occurred due to missing library or environment
+        // 2. Comprehensive Error Diagnosis & Resilient Strategy Switching
         if (lastFailure != null) {
             val (toolName, result) = lastFailure
-            val err = result.stderr.lowercase()
+            val err = (result.errorMessage.orEmpty() + " " + result.stderr).lowercase()
 
-            if (err.contains("no module named") || err.contains("modulenotfounderror") || err.contains("nameerror")) {
+            // A. TIMEOUTS: Apply exponential backoff and break operation into sub-steps
+            if (result.timedOut || err.contains("timed out") || err.contains("timeout")) {
+                val attemptCount = failedApproaches.count { it.error.lowercase().contains("timeout") } + 1
+                val backoffMs = (1000L * (1 shl attemptCount.coerceAtMost(4))) + (100..400).random()
                 return ReplanDecision(
-                    type = ReplanDecisionType.CHANGE_STRATEGY,
-                    explanation = "Python environment is missing an external dependency. Switching strategy to built-in OpenXML document generator or standard library script.",
-                    suggestedTool = "python_execute",
-                    suggestedParameters = """{"code": "# Standard library fallback\n"}""",
-                    suggestedIntent = "Switch to built-in generator or standard library without external dependencies."
+                    type = ReplanDecisionType.EXPONENTIAL_BACKOFF,
+                    explanation = "Operation timed out during $toolName. Applying exponential backoff (${backoffMs}ms) and splitting task into smaller units.",
+                    suggestedTool = if (toolName == "playwright_browser") "playwright_browser" else "run_command",
+                    suggestedIntent = "Retry with smaller chunk size and increased execution headroom.",
+                    backoffDelayMs = backoffMs
                 )
             }
 
+            // B. RATE LIMITS / HTTP 429
+            if (err.contains("429") || err.contains("rate limit") || err.contains("quota exceeded") || err.contains("too many requests")) {
+                val backoffMs = 2500L * (failedApproaches.size + 1)
+                return ReplanDecision(
+                    type = ReplanDecisionType.EXPONENTIAL_BACKOFF,
+                    explanation = "API or upstream rate limit reached (HTTP 429). Pausing with exponential backoff before continuing.",
+                    suggestedIntent = "Wait for rate limit recovery window.",
+                    backoffDelayMs = backoffMs
+                )
+            }
+
+            // C. PYTHON MISSING MODULES / EXTERNAL LIBS -> Fall back to built-in native generators
+            if (err.contains("no module named") || err.contains("modulenotfounderror") || err.contains("nameerror")) {
+                val isDocRequest = task.title.lowercase().contains("doc") || task.title.lowercase().contains("report") || task.title.lowercase().contains("word")
+                val isSpreadsheetRequest = task.title.lowercase().contains("sheet") || task.title.lowercase().contains("excel") || task.title.lowercase().contains("csv")
+
+                return when {
+                    isDocRequest -> ReplanDecision(
+                        type = ReplanDecisionType.FALLBACK_BUILTIN,
+                        explanation = "Python python-docx / reportlab library not found. Switching to built-in validated OpenXML document_create generator.",
+                        suggestedTool = "document_create",
+                        suggestedParameters = JSONObject().apply {
+                            put("filename", "/artifacts/report.docx")
+                            put("title", task.title)
+                        }.toString(),
+                        suggestedIntent = "Use built-in OpenXML generator to produce deliverable without python dependencies."
+                    )
+                    isSpreadsheetRequest -> ReplanDecision(
+                        type = ReplanDecisionType.FALLBACK_BUILTIN,
+                        explanation = "Python openpyxl / pandas library not found. Switching to built-in validated OpenXML spreadsheet_create generator.",
+                        suggestedTool = "spreadsheet_create",
+                        suggestedParameters = JSONObject().apply {
+                            put("filename", "/artifacts/data.xlsx")
+                            put("sheetName", "Summary")
+                        }.toString(),
+                        suggestedIntent = "Use built-in XLSX workbook generator to produce deliverable."
+                    )
+                    else -> ReplanDecision(
+                        type = ReplanDecisionType.CHANGE_STRATEGY,
+                        explanation = "Python missing external library. Executing via standard library or pure bash POSIX builtins.",
+                        suggestedTool = "run_command",
+                        suggestedIntent = "Execute using standard library or POSIX command line."
+                    )
+                }
+            }
+
+            // D. FILE EDITING / PATCH ERRORS (targetContent not found)
+            if (err.contains("targetcontent not found") || err.contains("patch target block") || err.contains("target string not found")) {
+                return ReplanDecision(
+                    type = ReplanDecisionType.REPAIR_CURRENT_STEP,
+                    explanation = "File patch failed due to whitespace/formatting mismatch. Viewing file lines first to inspect exact contents before re-applying patch.",
+                    suggestedTool = "text_editor",
+                    suggestedParameters = JSONObject().apply {
+                        put("operation", "view")
+                        put("path", "/workspace")
+                    }.toString(),
+                    suggestedIntent = "View existing file structure to ensure precise replacement target."
+                )
+            }
+
+            // E. COMMAND NOT FOUND
+            if (err.contains("command not found") || err.contains("not found: ") || result.exitCode == 127) {
+                return ReplanDecision(
+                    type = ReplanDecisionType.CHANGE_STRATEGY,
+                    explanation = "Command '$toolName' or binary not found in container PATH. Switching to native tool implementation.",
+                    suggestedTool = "run_command",
+                    suggestedIntent = "Switch to native container tools."
+                )
+            }
+
+            // F. PERMISSION DENIED
             if (err.contains("permission denied") || result.exitCode == 126) {
                 return ReplanDecision(
                     type = ReplanDecisionType.REPAIR_CURRENT_STEP,
-                    explanation = "Permission denied on file or directory. Repairing file permissions or executing in /workspace.",
+                    explanation = "Permission denied. Redirecting file target to /workspace and setting write permissions.",
                     suggestedTool = "run_command",
-                    suggestedParameters = """{"command": "chmod +x ${result.workingDirectory}"}""",
-                    suggestedIntent = "Apply execution permissions and retry."
-                )
-            }
-
-            if (result.timedOut) {
-                return ReplanDecision(
-                    type = ReplanDecisionType.CHANGE_STRATEGY,
-                    explanation = "Previous operation timed out. Splitting into smaller incremental operations.",
-                    suggestedTool = "run_command",
-                    suggestedIntent = "Split long operation into incremental steps."
+                    suggestedParameters = """{"command": "chmod -R 777 ${resolver.workspaceDir.absolutePath}"}""",
+                    suggestedIntent = "Grant workspace permissions and retry."
                 )
             }
         }
 
-        // 3. Check if too many approaches failed (e.g. 4+ failures) -> halt instead of looping forever
-        if (failedApproaches.size >= 4) {
+        // 3. Prevent Infinite Failure Cycles (halt after 5 failed approaches)
+        if (failedApproaches.size >= 5) {
             return ReplanDecision(
                 type = ReplanDecisionType.ABORT,
-                explanation = "Exhausted viable strategies (${failedApproaches.size} attempts failed). Halting execution to prevent destructive loop.",
-                suggestedIntent = "Execution blocked due to repeated strategy failure."
+                explanation = "Exhausted 5 alternative strategies without successful convergence. Halting session safely to prevent infinite loops.",
+                suggestedIntent = "Session terminated: strategy recovery limit reached."
             )
         }
 
-        // 4. Default: repair active step and continue with explicit intent
+        // 4. Default: repair active step and continue
         return ReplanDecision(
             type = ReplanDecisionType.REPAIR_CURRENT_STEP,
-            explanation = "Adjusting parameters and repairing current step (${activeStep?.title ?: "execution"}).",
-            suggestedIntent = "Retry step with adjusted parameters."
+            explanation = "Self-correcting parameters for active step '${activeStep?.title ?: "execution"}'.",
+            suggestedIntent = "Retry step with calibrated arguments."
         )
     }
 }

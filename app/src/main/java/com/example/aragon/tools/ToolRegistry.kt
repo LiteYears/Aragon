@@ -346,6 +346,90 @@ class ToolRegistry {
 
         register(
             ToolDefinition(
+                name = "playwright_browser",
+                description = "Automate web browsing with headless Playwright engine. Supports navigating to URLs, extracting clean markdown or raw text, interacting with selectors (click, fill, type), evaluating JavaScript, and capturing full-page PNG screenshots saved to artifacts.",
+                parameters = listOf(
+                    ToolParameter("action", "string", "Action to perform: 'navigate', 'get_content', 'extract_markdown', 'screenshot', 'click', 'fill', 'evaluate', 'search'", required = true),
+                    ToolParameter("url", "string", "Target URL to navigate or inspect", required = false),
+                    ToolParameter("selector", "string", "CSS or text selector for click/fill interactions", required = false),
+                    ToolParameter("text", "string", "Text content to type for fill action or query for search", required = false),
+                    ToolParameter("script", "string", "JavaScript code snippet to evaluate in page context", required = false),
+                    ToolParameter("outputPath", "string", "Optional destination path for screenshot artifact (e.g. /artifacts/page.png)", required = false),
+                    ToolParameter("waitFor", "string", "Optional wait condition: 'domcontentloaded', 'networkidle'", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "web_search",
+                description = "Search the public web for real-time information, documentation, packages, and technical specifications with ranked search snippets.",
+                parameters = listOf(
+                    ToolParameter("query", "string", "The search query keywords", required = true)
+                ),
+                permission = ToolPermission.SAFE
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "mcp_client",
+                description = "Execute tools or read resources from Model Context Protocol (MCP) servers (embedded filesystem, playwright, data servers, or remote SSE/HTTP MCP endpoints).",
+                parameters = listOf(
+                    ToolParameter("toolName", "string", "The MCP tool name to execute (e.g. 'fs_read_file', 'fs_write_file', 'data_sqlite_query')", required = true),
+                    ToolParameter("arguments", "string", "JSON object of tool arguments", required = true),
+                    ToolParameter("serverName", "string", "Optional MCP server name (e.g. 'aragon-filesystem', 'aragon-playwright', 'aragon-data')", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "mcp_manage",
+                description = "Manage Model Context Protocol (MCP) servers and inspect discovered tools, resources, and prompt templates.",
+                parameters = listOf(
+                    ToolParameter("action", "string", "Action: 'list_servers', 'list_tools', 'register_server'", required = true),
+                    ToolParameter("serverName", "string", "Server identifier", required = false),
+                    ToolParameter("endpointUrl", "string", "SSE or HTTP endpoint URL when registering remote server", required = false)
+                ),
+                permission = ToolPermission.SAFE
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "file_patch",
+                description = "Safely build upon and modify existing files. Supports exact replacement, flexible whitespace matching, line-range replacement, anchor insertion (insert_after/insert_before), append, and rollback.",
+                parameters = listOf(
+                    ToolParameter("operation", "string", "Operation: 'patch', 'replace', 'replace_lines', 'insert_after', 'insert_before', 'append', 'view', 'rollback'", required = true),
+                    ToolParameter("path", "string", "Path to file in workspace or artifacts", required = true),
+                    ToolParameter("targetContent", "string", "Exact code block or anchor string to target", required = false),
+                    ToolParameter("replacementContent", "string", "New code block or replacement content", required = false),
+                    ToolParameter("startLine", "integer", "Starting line number for line-based edits", required = false),
+                    ToolParameter("lineCount", "integer", "Number of lines to replace", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "edit_file",
+                description = "Alias for file_patch: incrementally edit and build upon an existing workspace file.",
+                parameters = listOf(
+                    ToolParameter("path", "string", "Path to target file", required = true),
+                    ToolParameter("targetContent", "string", "Target block to replace", required = false),
+                    ToolParameter("replacementContent", "string", "Replacement block", required = false),
+                    ToolParameter("operation", "string", "Operation: 'replace', 'patch', 'append' (default: 'replace')", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
                 name = "complete_task",
                 description = "Explicitly signal that all requested objectives, files, or analysis have been successfully created and completed.",
                 parameters = listOf(
