@@ -288,12 +288,15 @@ class SessionOrchestrator(
                     logEvent(taskId, TimelineEventType.DECISION, "Agent Thought & Strategy", response.reasoning)
                 }
 
-                // Tool Execution Dispatch
-                if (response.toolCalls.isNotEmpty()) {
+                // Tool Execution Dispatch (native tool calls or parsed structured calls from content)
+                val parsedContentCalls = com.example.aragon.llm.ToolCallParser.parseFromContent(response.content)
+                val allToolCalls = if (response.toolCalls.isNotEmpty()) response.toolCalls else parsedContentCalls
+
+                if (allToolCalls.isNotEmpty()) {
                     taskDao.updateStatus(taskId, TaskStatus.OBSERVING)
                     var goalAchievedDuringTools = false
 
-                    for (tc in response.toolCalls) {
+                    for (tc in allToolCalls) {
                         val callId = tc.id.ifBlank { "call_${System.currentTimeMillis()}" }
                         val toolCall = ToolCall(
                             callId = callId,
@@ -303,15 +306,43 @@ class SessionOrchestrator(
                             iterationId = currentIteration
                         )
 
+                        // 1. TOOL REQUESTED (Planned/Requested Intent)
                         logEvent(
                             taskId = taskId,
-                            type = TimelineEventType.ACTION,
-                            title = "Action: ${tc.name}",
+                            type = TimelineEventType.TOOL_REQUESTED,
+                            title = "Tool Requested: ${tc.name}",
                             details = tc.argumentsJson,
                             toolCallId = callId
                         )
 
-                        val toolResult = toolDispatcher.dispatch(toolCall, resolver, preferencesManager.autonomyLevel.value)
+                        // 2. TOOL DISPATCHED (Validated & Handed to execution engine)
+                        logEvent(
+                            taskId = taskId,
+                            type = TimelineEventType.TOOL_DISPATCHED,
+                            title = "Tool Dispatched: ${tc.name}",
+                            details = "Validating parameters and dispatching to execution substrate",
+                            toolCallId = callId
+                        )
+
+                        // 3. EXECUTION
+                        val toolResult = toolDispatcher.dispatch(
+                            toolCall = toolCall,
+                            resolver = resolver,
+                            autonomyLevel = preferencesManager.autonomyLevel.value,
+                            onStatusChange = { status ->
+                                if (status == com.example.aragon.domain.model.ToolExecutionStatus.RUNNING) {
+                                    sessionScope.launch {
+                                        logEvent(
+                                            taskId = taskId,
+                                            type = TimelineEventType.TOOL_STARTED,
+                                            title = "Tool Running: ${tc.name}",
+                                            details = "Process started in environment",
+                                            toolCallId = callId
+                                        )
+                                    }
+                                }
+                            }
+                        )
 
                         // Check if tool is waiting for human approval
                         if (toolResult.cancelled && toolResult.terminationReason == "AWAITING_APPROVAL") {
@@ -320,7 +351,7 @@ class SessionOrchestrator(
                             return
                         }
 
-                        // Persist execution
+                        // 4. PERSIST TOOL EXECUTION RECORD
                         toolExecutionDao.insertExecution(
                             ToolExecutionEntity(
                                 callId = callId,
@@ -334,7 +365,12 @@ class SessionOrchestrator(
                                 durationMs = toolResult.durationMs,
                                 workingDirectory = toolResult.workingDirectory,
                                 errorType = toolResult.errorType,
-                                errorMessage = toolResult.errorMessage
+                                errorMessage = toolResult.errorMessage,
+                                requestedAt = toolCall.requestedAt,
+                                dispatchedAt = toolResult.startedAt,
+                                startedAt = toolResult.startedAt,
+                                completedAt = toolResult.completedAt,
+                                status = toolResult.status.name
                             )
                         )
 
@@ -349,20 +385,39 @@ class SessionOrchestrator(
                             commandsExecuted = if (tc.name == "run_command") metrics.commandsExecuted + 1 else metrics.commandsExecuted
                         )
 
-                        // Formatted Observation
-                        val obsDetails = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800)
+                        // 5. REGISTER REAL ARTIFACTS LINKED TO THIS INVOCATION
+                        for (createdPath in toolResult.artifacts) {
+                            artifactManager.registerArtifactFromTool(taskId, createdPath, callId, resolver)
+                        }
+                        val currentDiscovered = artifactManager.discoverArtifacts(taskId, resolver, activeToolInvocationId = callId)
+
+                        // 6. TOOL COMPLETED EVENT
+                        val completionSummary = if (toolResult.success) {
+                            "Exit code: 0 • Duration: ${toolResult.durationMs}ms"
+                        } else {
+                            "Exit code: ${toolResult.exitCode} • ${toolResult.errorMessage ?: toolResult.stderr.take(150)}"
+                        }
                         logEvent(
                             taskId = taskId,
-                            type = TimelineEventType.OBSERVATION,
-                            title = "Observation: ${tc.name} (${if (toolResult.success) "Exit 0" else "Exit ${toolResult.exitCode}"})",
-                            details = obsDetails,
+                            type = TimelineEventType.TOOL_COMPLETED,
+                            title = "Tool Completed: ${tc.name} (${if (toolResult.success) "Success" else "Exit ${toolResult.exitCode}"})",
+                            details = completionSummary,
                             toolCallId = callId,
                             durationMs = toolResult.durationMs,
                             isSuccess = toolResult.success
                         )
 
-                        // Immediately discover artifacts generated by this tool
-                        val currentDiscovered = artifactManager.discoverArtifacts(taskId, resolver)
+                        // 7. OBSERVATION EVENT
+                        val obsDetails = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800)
+                        logEvent(
+                            taskId = taskId,
+                            type = TimelineEventType.OBSERVATION,
+                            title = "Observation: ${tc.name}",
+                            details = obsDetails,
+                            toolCallId = callId,
+                            durationMs = toolResult.durationMs,
+                            isSuccess = toolResult.success
+                        )
 
                         // Update current active phase and subtask progress
                         advancePlanStepProgress(taskId, tc.name, toolResult.success)
@@ -379,7 +434,7 @@ class SessionOrchestrator(
                                 taskId,
                                 TimelineEventType.GOAL_COMPLETED,
                                 "Goal Achieved ✓",
-                                "All success criteria met after executing ${tc.name}. Stopping execution immediately."
+                                "All success criteria met after executing ${tc.name}. Deliverables verified on disk."
                             )
                             completeTask(task, goalSummary, resolver, planSteps)
                             goalAchievedDuringTools = true
@@ -389,7 +444,7 @@ class SessionOrchestrator(
                                 taskId,
                                 TimelineEventType.ERROR,
                                 "Completion Rejected: Unmet Criteria",
-                                "The agent attempted to call complete_task, but objective verification failed: ${postToolVerification.summary}. Deliverables are missing from disk."
+                                "The agent called complete_task, but objective verification failed: ${postToolVerification.summary}. Deliverables are missing from disk."
                             )
                         }
 
@@ -401,7 +456,6 @@ class SessionOrchestrator(
                             logEvent(taskId, TimelineEventType.ERROR, "Loop Detected (${loopAnalysis.loopType})", loopAnalysis.reason)
 
                             if (loopAnalysis.shouldTerminateBlocked) {
-                                // Agent is stuck repeating identical actions or stagnant without progress -> STOP
                                 taskDao.updateTask(
                                     TaskEntity.fromDomain(
                                         task.copy(
@@ -449,101 +503,49 @@ class SessionOrchestrator(
                     }
                 } else {
                     // Model finished generating text without tool calls
-                    logEvent(taskId, TimelineEventType.RESULT, "Agent Synthesis", response.content)
+                    logEvent(taskId, TimelineEventType.RESULT, "Model Response", response.content)
+
+                    // Invariant check: Detect conversational claims pretending to execute without tools
+                    if (com.example.aragon.llm.ToolCallParser.isClaimingExecutionWithoutToolCall(response.content)) {
+                        logEvent(
+                            taskId,
+                            TimelineEventType.ERROR,
+                            "Unverified Prose Claim",
+                            "Model described actions in conversational text without invoking a structured tool. No actions executed."
+                        )
+                        contextManager.recordFailedApproach(
+                            strategy = "conversational_claim_without_tool",
+                            error = "Model generated plain text describing work instead of structured tool call",
+                            context = response.content.take(200)
+                        )
+                    }
 
                     taskDao.updateStatus(taskId, TaskStatus.VERIFYING)
-                    var verification = verificationEngine.verifyTaskObjective(task, resolver)
-
-                    // If criteria are unmet, materialize the requested deliverables from the synthesis/prompt directly:
-                    if (!verification.isVerified) {
-                        val reqLower = task.originalRequest.lowercase()
-
-                        // 1. DOCX Report Objective
-                        if (reqLower.contains(".docx") || reqLower.contains("docx") || reqLower.contains("word document") || reqLower.contains("report")) {
-                            val docxTarget = File(resolver.artifactsDir, "report.docx")
-                            val lines = response.content.lines().map { it.trim() }.filter { it.isNotBlank() }
-                            val paras = lines.filter { !it.startsWith("#") && !it.startsWith("|") && !it.startsWith("-") && !it.startsWith("•") && !it.startsWith("*") }
-                            val bullets = lines.filter { it.startsWith("-") || it.startsWith("•") || it.startsWith("*") }.map { it.removePrefix("-").removePrefix("•").removePrefix("*").trim() }
-
-                            DocxGenerator.createDocument(
-                                docxTarget,
-                                DocxGenerator.DocxContent(
-                                    title = "Administrative Performance Report",
-                                    subtitle = "Executive Summary & System Performance Metrics",
-                                    paragraphs = if (paras.isNotEmpty()) paras.take(8) else listOf(
-                                        "This administrative report was compiled by the Aragon autonomous computer agent.",
-                                        "Executive Summary: All system performance metrics have been compiled, audited, and verified under verified execution constraints.",
-                                        "All subsystems and storage boundaries conform to validated OpenXML standards."
-                                    ),
-                                    bulletPoints = if (bullets.isNotEmpty()) bullets.take(6) else listOf(
-                                        "Uptime & Reliability: 99.98% nominal execution",
-                                        "Latency: 14ms average dispatch duration",
-                                        "Security boundaries: Confirmed enforced sandbox"
-                                    ),
-                                    tableHeaders = listOf("Subsystem / Metric", "Current Status", "Performance / Latency"),
-                                    tableRows = listOf(
-                                        DocxGenerator.TableRow(listOf("Agent Harness", "Operational", "Verified")),
-                                        DocxGenerator.TableRow(listOf("Execution Substrate", "Compliant", "12ms")),
-                                        DocxGenerator.TableRow(listOf("Document Engine", "Passed", "OpenXML Standards Compliant"))
-                                    )
-                                )
-                            )
-                            logEvent(taskId, TimelineEventType.ARTIFACT_GENERATION, "Created Product DOCX", "Compiled OpenXML deliverable to /artifacts/report.docx (${docxTarget.length()} bytes)")
-                            artifactManager.discoverArtifacts(taskId, resolver)
-                        }
-
-                        // 2. Python Script Objective
-                        if (reqLower.contains(".py") || reqLower.contains("python") || reqLower.contains("script")) {
-                            val codeBlockRegex = Regex("""```(?:python)?\s*([\s\S]*?)```""")
-                            val extractedCode = codeBlockRegex.find(response.content)?.groupValues?.get(1)?.trim()
-                            val pyFilename = extractTargetPyFilename(task.originalRequest) ?: "main.py"
-                            val pyFile = File(resolver.workspaceDir, pyFilename)
-                            val finalCode = extractedCode?.takeIf { it.isNotBlank() } ?: generateDeterministicPythonScript(task.originalRequest, pyFilename)
-                            pyFile.parentFile?.mkdirs()
-                            pyFile.writeText(finalCode, Charsets.UTF_8)
-                            logEvent(taskId, TimelineEventType.ARTIFACT_GENERATION, "Created Python Script", "Generated $pyFilename in /workspace (${pyFile.length()} bytes)")
-                            artifactManager.discoverArtifacts(taskId, resolver)
-                        }
-
-                        // 3. Text file Objective (e.g. hello.txt)
-                        if (reqLower.contains(".txt") || reqLower.contains("hello.txt")) {
-                            val txtName = if (reqLower.contains("hello.txt")) "hello.txt" else "output.txt"
-                            val txtFile = File(resolver.workspaceDir, txtName)
-                            if (!txtFile.exists()) {
-                                val txtContent = response.content.ifBlank { "Hello Aragon Autonomous Agent\nObjective: ${task.originalRequest}\nStatus: Verified\n" }
-                                txtFile.writeText(txtContent, Charsets.UTF_8)
-                                logEvent(taskId, TimelineEventType.ARTIFACT_GENERATION, "Created $txtName", "Wrote target deliverable in /workspace (${txtFile.length()} bytes)")
-                                artifactManager.discoverArtifacts(taskId, resolver)
-                            }
-                        }
-
-                        // Re-verify after materializing deliverables
-                        verification = verificationEngine.verifyTaskObjective(task, resolver)
-                    }
+                    val verification = verificationEngine.verifyTaskObjective(task, resolver)
 
                     if (verification.isVerified) {
                         logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { verification.summary })
                         completeTask(task, response.content.ifBlank { verification.summary }, resolver, planSteps)
-                        break // STOP ITERATING IMMEDIATELY!
+                        break
                     } else {
-                        // Autonomous fallback: Execute deterministic deliverable generation so user gets actual output
-                        executeDeterministicStep(task, planSteps, resolver, currentIteration)
-                        val finalVerification = verificationEngine.verifyTaskObjective(task, resolver)
-                        if (finalVerification.isVerified) {
-                            logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓ (Remediated)", finalVerification.summary)
-                            completeTask(task, finalVerification.summary, resolver, planSteps)
-                            break
-                        } else {
+                        // Deliverables are missing and model did not call tools
+                        logEvent(
+                            taskId,
+                            TimelineEventType.REASONING,
+                            "Tool Execution Mandate",
+                            "Objective criteria unmet (${verification.summary}). You must call structured tools (e.g. document_create, file_write, run_command) to produce deliverables."
+                        )
+                        if (currentIteration >= maxIterations - 1) {
                             taskDao.updateTask(
                                 TaskEntity.fromDomain(
                                     task.copy(
                                         status = TaskStatus.FAILED,
-                                        lastError = "Objective criteria unmet: ${finalVerification.summary}"
+                                        lastError = "Objective criteria unmet: ${verification.summary}"
                                     )
                                 )
                             )
-                            logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", finalVerification.summary)
-                            logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", "Required deliverables were not created on disk.")
+                            logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", verification.summary)
+                            logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", "Required deliverables were not created on disk via tools.")
                             break
                         }
                     }

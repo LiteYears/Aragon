@@ -111,6 +111,16 @@ data class Project(
     val updatedAt: Long = System.currentTimeMillis()
 )
 
+enum class ToolExecutionStatus {
+    PLANNED,
+    REQUESTED,
+    DISPATCHED,
+    RUNNING,
+    SUCCEEDED,
+    FAILED,
+    CANCELLED
+}
+
 data class Artifact(
     val id: String,
     val taskId: String,
@@ -126,7 +136,9 @@ data class Artifact(
     val previewable: Boolean = true,
     val shareable: Boolean = true,
     val downloadable: Boolean = true,
-    val validationDetails: String = ""
+    val validationDetails: String = "",
+    val sourceToolInvocationId: String? = null,
+    val existsOnDisk: Boolean = true
 )
 
 data class ToolCall(
@@ -136,7 +148,9 @@ data class ToolCall(
     val argumentsJson: String,
     val timestamp: Long = System.currentTimeMillis(),
     val sessionId: String = taskId,
-    val iterationId: Int = 1
+    val iterationId: Int = 1,
+    val requestedAt: Long = System.currentTimeMillis(),
+    val status: ToolExecutionStatus = ToolExecutionStatus.REQUESTED
 ) {
     val id: String get() = callId
 }
@@ -155,7 +169,10 @@ data class ToolResult(
     val terminationReason: String? = null,
     val artifacts: List<String> = emptyList(),
     val errorType: String? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val startedAt: Long = 0L,
+    val completedAt: Long = 0L,
+    val status: ToolExecutionStatus = if (cancelled) ToolExecutionStatus.CANCELLED else if (success) ToolExecutionStatus.SUCCEEDED else ToolExecutionStatus.FAILED
 ) {
     val toolCallId: String get() = callId
 }
@@ -238,6 +255,10 @@ enum class TimelineEventType {
     PLANNING,
     TASK_STARTED,
     ACTION,
+    TOOL_REQUESTED,
+    TOOL_DISPATCHED,
+    TOOL_STARTED,
+    TOOL_COMPLETED,
     TOOL_EXECUTION,
     OBSERVATION,
     REASONING,

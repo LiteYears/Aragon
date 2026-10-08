@@ -111,9 +111,9 @@ class ContextManager(
             )
         )
 
-        // 3. Compact state overview
+        // 3. Compact state overview presented as execution environment context
         val stateSummary = buildString {
-            appendLine("### AGENT STATE:")
+            appendLine("### ENVIRONMENT & EXECUTION STATE:")
             appendLine("- Status: ${task.status}")
             appendLine("- Iteration: ${task.iteration}")
             appendLine("- Current Objective: ${task.currentObjective.ifBlank { task.title }}")
@@ -133,9 +133,10 @@ class ContextManager(
             }
 
             if (artifacts.isNotEmpty()) {
-                appendLine("\n### DISCOVERED ARTIFACTS:")
+                appendLine("\n### DISCOVERED ARTIFACTS ON DISK:")
                 artifacts.forEach { art ->
-                    appendLine("- ${art.filename} (${art.size}B, Stage: ${art.stage}, Valid: ${art.valid}) -> ${art.logicalPath}")
+                    val verifiedTag = if (art.verified && art.existsOnDisk) "VERIFIED" else "UNVERIFIED"
+                    appendLine("- ${art.filename} (${art.size}B, Stage: ${art.stage}, [$verifiedTag]) -> ${art.logicalPath}")
                 }
             }
 
@@ -153,12 +154,12 @@ class ContextManager(
 
         messages.add(
             LlmMessage(
-                role = LlmRole.ASSISTANT,
+                role = LlmRole.USER,
                 content = stateSummary
             )
         )
 
-        // 4. Recent tool executions with compressed outputs
+        // 4. Recent tool executions with strictly compliant Assistant tool_call -> Tool observation pairs
         val resultsToInclude = recentToolResults.takeLast(maxRecentResultsInline)
         for ((toolName, result) in resultsToInclude) {
             val content = buildString {
@@ -174,6 +175,21 @@ class ContextManager(
                     appendLine("Artifacts produced: ${result.artifacts.joinToString()}")
                 }
             }
+
+            // Must have assistant message with matching toolCalls immediately before tool message
+            messages.add(
+                LlmMessage(
+                    role = LlmRole.ASSISTANT,
+                    content = "",
+                    toolCalls = listOf(
+                        com.example.aragon.llm.LlmToolCall(
+                            id = result.callId,
+                            name = toolName,
+                            argumentsJson = "{}"
+                        )
+                    )
+                )
+            )
 
             messages.add(
                 LlmMessage(

@@ -197,7 +197,9 @@ data class ArtifactEntity(
     val shareable: Boolean,
     val downloadable: Boolean,
     val validationDetails: String,
-    val stage: com.example.aragon.domain.model.ArtifactStage = com.example.aragon.domain.model.ArtifactStage.PRODUCT
+    val stage: com.example.aragon.domain.model.ArtifactStage = com.example.aragon.domain.model.ArtifactStage.PRODUCT,
+    val sourceToolInvocationId: String? = null,
+    val existsOnDisk: Boolean = true
 ) {
     fun toDomain(): Artifact = Artifact(
         id = id,
@@ -214,7 +216,9 @@ data class ArtifactEntity(
         previewable = previewable,
         shareable = shareable,
         downloadable = downloadable,
-        validationDetails = validationDetails
+        validationDetails = validationDetails,
+        sourceToolInvocationId = sourceToolInvocationId,
+        existsOnDisk = existsOnDisk
     )
 
     companion object {
@@ -233,7 +237,9 @@ data class ArtifactEntity(
             previewable = artifact.previewable,
             shareable = artifact.shareable,
             downloadable = artifact.downloadable,
-            validationDetails = artifact.validationDetails
+            validationDetails = artifact.validationDetails,
+            sourceToolInvocationId = artifact.sourceToolInvocationId,
+            existsOnDisk = artifact.existsOnDisk
         )
     }
 }
@@ -252,7 +258,12 @@ data class ToolExecutionEntity(
     val workingDirectory: String,
     val errorType: String?,
     val errorMessage: String?,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val requestedAt: Long = timestamp,
+    val dispatchedAt: Long = timestamp,
+    val startedAt: Long = timestamp,
+    val completedAt: Long = timestamp,
+    val status: String = if (success) "SUCCEEDED" else "FAILED"
 ) {
     fun toDomainResult(): ToolResult = ToolResult(
         callId = callId,
@@ -264,7 +275,11 @@ data class ToolExecutionEntity(
         durationMs = durationMs,
         workingDirectory = workingDirectory,
         errorType = errorType,
-        errorMessage = errorMessage
+        errorMessage = errorMessage,
+        startedAt = startedAt,
+        completedAt = completedAt,
+        status = runCatching { com.example.aragon.domain.model.ToolExecutionStatus.valueOf(status) }
+            .getOrDefault(if (success) com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED else com.example.aragon.domain.model.ToolExecutionStatus.FAILED)
     )
 }
 

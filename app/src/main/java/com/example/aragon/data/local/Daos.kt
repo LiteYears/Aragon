@@ -88,6 +88,9 @@ interface ArtifactDao {
     @Query("SELECT * FROM artifacts WHERE id = :artifactId")
     suspend fun getArtifactById(artifactId: String): ArtifactEntity?
 
+    @Query("SELECT * FROM artifacts WHERE taskId = :taskId AND logicalPath = :logicalPath LIMIT 1")
+    suspend fun getArtifactByLogicalPath(taskId: String, logicalPath: String): ArtifactEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertArtifact(artifact: ArtifactEntity)
 
@@ -96,6 +99,9 @@ interface ArtifactDao {
 
     @Query("DELETE FROM artifacts WHERE id = :artifactId")
     suspend fun deleteArtifact(artifactId: String)
+
+    @Query("DELETE FROM artifacts WHERE taskId = :taskId")
+    suspend fun deleteArtifactsForTask(taskId: String)
 }
 
 @Dao
@@ -106,8 +112,14 @@ interface ToolExecutionDao {
     @Query("SELECT * FROM tool_executions WHERE taskId = :taskId ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentExecutions(taskId: String, limit: Int = 10): List<ToolExecutionEntity>
 
+    @Query("SELECT * FROM tool_executions WHERE callId = :callId LIMIT 1")
+    suspend fun getExecutionByCallId(callId: String): ToolExecutionEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertExecution(execution: ToolExecutionEntity)
+
+    @Update
+    suspend fun updateExecution(execution: ToolExecutionEntity)
 }
 
 @Dao

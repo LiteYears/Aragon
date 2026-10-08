@@ -33,18 +33,85 @@ class ArtifactManager(
         }
     }
 
-    suspend fun discoverArtifacts(taskId: String, resolver: WorkspacePathResolver): List<Artifact> = withContext(Dispatchers.IO) {
+    suspend fun registerArtifactFromTool(
+        taskId: String,
+        logicalPath: String,
+        sourceToolInvocationId: String,
+        resolver: WorkspacePathResolver
+    ): Artifact? = withContext(Dispatchers.IO) {
+        val file = resolver.resolve(logicalPath)
+        if (!file.exists() || !file.isFile || !file.canRead()) {
+            return@withContext null
+        }
+
+        val report = ArtifactValidator.validate(file)
+        val stage = if (logicalPath.startsWith("/artifacts") ||
+            file.extension.lowercase() in listOf("docx", "xlsx", "pdf", "apk", "zip", "pptx", "py", "txt", "md")
+        ) ArtifactStage.PRODUCT else ArtifactStage.PROCESS
+
+        val stableId = ArtifactDetector.generateStableId(taskId, logicalPath)
+        val existing = artifactDao.getArtifactByLogicalPath(taskId, logicalPath)
+
+        val entity = ArtifactEntity(
+            id = existing?.id ?: stableId,
+            taskId = taskId,
+            logicalPath = logicalPath,
+            filename = file.name,
+            mimeType = report.mimeType,
+            size = file.length(),
+            createdAt = existing?.createdAt ?: file.lastModified(),
+            modifiedAt = file.lastModified(),
+            valid = report.isValid,
+            verified = report.isValid,
+            previewable = true,
+            shareable = stage == ArtifactStage.PRODUCT && report.isValid,
+            downloadable = true,
+            validationDetails = report.details,
+            stage = stage,
+            sourceToolInvocationId = sourceToolInvocationId,
+            existsOnDisk = true
+        )
+
+        artifactDao.insertArtifact(entity)
+        entity.toDomain()
+    }
+
+    suspend fun discoverArtifacts(
+        taskId: String,
+        resolver: WorkspacePathResolver,
+        activeToolInvocationId: String? = null
+    ): List<Artifact> = withContext(Dispatchers.IO) {
         // Automatically sync any files created in OpenSandbox microVM into local workspace
         runCatching {
             com.example.aragon.AragonApplication.instance.openSandboxManager.syncSandboxToLocal(resolver)
         }
 
         val detected = detector.scan(taskId, resolver)
-        val result = mutableListOf<Artifact>()
+        val existingEntities = artifactDao.getArtifactsForTask(taskId)
+        val existingMap = existingEntities.associateBy { it.logicalPath }
+        val detectedPaths = detected.map { it.logicalPath }.toSet()
 
+        // 1. Reconcile missing or deleted files in database
+        for (existing in existingEntities) {
+            val realFile = resolver.resolve(existing.logicalPath)
+            if (!realFile.exists() || !realFile.isFile) {
+                if (existing.existsOnDisk || existing.valid) {
+                    val updatedMissing = existing.copy(
+                        existsOnDisk = false,
+                        valid = false,
+                        verified = false,
+                        downloadable = false,
+                        validationDetails = "File missing or deleted from disk"
+                    )
+                    artifactDao.updateArtifact(updatedMissing)
+                }
+            }
+        }
+
+        // 2. Insert or update existing detected artifacts
+        val result = mutableListOf<Artifact>()
         for (art in detected) {
-            val existing = artifactDao.getArtifactsForTask(taskId)
-                .find { it.logicalPath == art.logicalPath }
+            val existing = existingMap[art.logicalPath]
 
             val entity = if (existing != null) {
                 existing.copy(
@@ -54,10 +121,17 @@ class ArtifactManager(
                     verified = art.verified,
                     mimeType = art.mimeType,
                     stage = art.stage,
-                    validationDetails = art.validationDetails
+                    downloadable = art.existsOnDisk,
+                    existsOnDisk = art.existsOnDisk,
+                    validationDetails = art.validationDetails,
+                    sourceToolInvocationId = existing.sourceToolInvocationId ?: activeToolInvocationId
                 )
             } else {
-                ArtifactEntity.fromDomain(art)
+                ArtifactEntity.fromDomain(
+                    art.copy(
+                        sourceToolInvocationId = activeToolInvocationId
+                    )
+                )
             }
 
             artifactDao.insertArtifact(entity)

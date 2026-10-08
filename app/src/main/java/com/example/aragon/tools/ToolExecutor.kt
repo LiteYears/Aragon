@@ -630,6 +630,8 @@ class ToolExecutor(
             }
         }
 
+        val createdArtifacts = if (targetFile.exists() && targetFile.isFile) listOf(pathLogical) else emptyList()
+
         return ToolResult(
             callId = callId,
             taskId = taskId,
@@ -637,6 +639,7 @@ class ToolExecutor(
             exitCode = 0,
             stdout = "Successfully wrote ${targetFile.length()} bytes to $pathLogical",
             stderr = "",
+            artifacts = createdArtifacts,
             durationMs = System.currentTimeMillis() - startTime,
             workingDirectory = "/workspace"
         )

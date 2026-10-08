@@ -8,6 +8,13 @@ import java.util.UUID
 
 class ArtifactDetector {
 
+    companion object {
+        fun generateStableId(taskId: String, logicalPath: String): String {
+            val sanitized = logicalPath.replace(Regex("[^a-zA-Z0-9_]"), "_").trim('_')
+            return "art_${taskId}_$sanitized"
+        }
+    }
+
     fun scan(taskId: String, resolver: WorkspacePathResolver): List<Artifact> {
         val discovered = mutableListOf<Artifact>()
         val seenPaths = mutableSetOf<String>()
@@ -20,10 +27,11 @@ class ArtifactDetector {
             val logicalPath = resolver.toLogicalPath(file)
             val stage = classifyStage(file, logicalPath)
             val report = ArtifactValidator.validate(file)
+            val exists = file.exists() && file.isFile && file.canRead()
 
             discovered.add(
                 Artifact(
-                    id = UUID.randomUUID().toString(),
+                    id = generateStableId(taskId, logicalPath),
                     taskId = taskId,
                     logicalPath = logicalPath,
                     filename = file.name,
@@ -32,12 +40,13 @@ class ArtifactDetector {
                     createdAt = file.lastModified(),
                     modifiedAt = file.lastModified(),
                     stage = stage,
-                    valid = report.isValid,
-                    verified = report.isValid,
+                    valid = report.isValid && exists,
+                    verified = report.isValid && exists,
                     previewable = isPreviewable(report.mimeType),
-                    shareable = stage == ArtifactStage.PRODUCT && report.isValid,
-                    downloadable = true,
-                    validationDetails = report.details
+                    shareable = stage == ArtifactStage.PRODUCT && report.isValid && exists,
+                    downloadable = exists,
+                    validationDetails = if (exists) report.details else "File missing or inaccessible",
+                    existsOnDisk = exists
                 )
             )
         }

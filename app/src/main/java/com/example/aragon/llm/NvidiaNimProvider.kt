@@ -328,12 +328,15 @@ class NvidiaNimProvider(
                     }
                 }
 
-                val finalToolCalls = toolCallMap.values.map { (id, name, args) ->
+                var finalToolCalls = toolCallMap.values.map { (id, name, args) ->
                     LlmToolCall(
                         id = id.ifEmpty { "call_${System.currentTimeMillis()}" },
                         name = name,
                         argumentsJson = args.toString()
                     )
+                }
+                if (finalToolCalls.isEmpty() && fullContent.isNotEmpty()) {
+                    finalToolCalls = ToolCallParser.parseFromContent(fullContent.toString())
                 }
 
                 emit(
@@ -439,17 +442,9 @@ class NvidiaNimProvider(
         val reasoning = reasoningRaw.takeIf { it.isNotBlank() && it != "null" }
         val finishReason = choice.optString("finish_reason", "")
 
-        val toolCallsList = mutableListOf<LlmToolCall>()
-        val tcArr = message.optJSONArray("tool_calls")
-        if (tcArr != null) {
-            for (i in 0 until tcArr.length()) {
-                val tc = tcArr.getJSONObject(i)
-                val id = tc.optString("id", "call_$i")
-                val func = tc.optJSONObject("function") ?: JSONObject()
-                val name = func.optString("name", "")
-                val arguments = func.optString("arguments", "{}")
-                toolCallsList.add(LlmToolCall(id = id, name = name, argumentsJson = arguments))
-            }
+        var toolCallsList = ToolCallParser.parseFromOpenAiMessage(message)
+        if (toolCallsList.isEmpty() && content.isNotBlank()) {
+            toolCallsList = ToolCallParser.parseFromContent(content)
         }
 
         val usage = root.optJSONObject("usage")
