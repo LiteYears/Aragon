@@ -19,7 +19,7 @@ data class FileSnapshot(
 )
 
 class ArtifactManager(
-    private val artifactDao: ArtifactDao,
+    val artifactDao: ArtifactDao,
     private val detector: ArtifactDetector = ArtifactDetector()
 ) {
 
@@ -43,6 +43,39 @@ class ArtifactManager(
             map[logical] = FileSnapshot(logical, f.length(), f.lastModified(), hash)
         }
         return map
+    }
+
+    fun saveInitialBaseline(resolver: WorkspacePathResolver, snapshot: Map<String, FileSnapshot>) {
+        val baselineFile = File(resolver.stateDir, "initial_baseline.json")
+        baselineFile.parentFile?.mkdirs()
+        val array = org.json.JSONArray()
+        for ((_, snap) in snapshot) {
+            val obj = org.json.JSONObject()
+            obj.put("path", snap.logicalPath)
+            obj.put("size", snap.size)
+            obj.put("lastModified", snap.lastModified)
+            if (snap.contentHash != null) obj.put("hash", snap.contentHash)
+            array.put(obj)
+        }
+        baselineFile.writeText(array.toString(), Charsets.UTF_8)
+    }
+
+    fun loadInitialBaseline(resolver: WorkspacePathResolver): Map<String, FileSnapshot>? {
+        val baselineFile = File(resolver.stateDir, "initial_baseline.json")
+        if (!baselineFile.exists() || !baselineFile.isFile) return null
+        return runCatching {
+            val array = org.json.JSONArray(baselineFile.readText(Charsets.UTF_8))
+            val map = mutableMapOf<String, FileSnapshot>()
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                val p = obj.getString("path")
+                val s = obj.getLong("size")
+                val lm = obj.getLong("lastModified")
+                val h = if (obj.has("hash") && !obj.isNull("hash")) obj.getString("hash") else null
+                map[p] = FileSnapshot(p, s, lm, h)
+            }
+            map
+        }.getOrNull()
     }
 
     fun getArtifactsForTask(taskId: String): Flow<List<Artifact>> {

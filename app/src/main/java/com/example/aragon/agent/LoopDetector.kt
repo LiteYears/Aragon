@@ -28,6 +28,7 @@ class LoopDetector(
 ) {
     private val history = mutableListOf<ActionRecord>()
     private var consecutiveLoopDetections = 0
+    private var unreconciledUnknownAction: ActionRecord? = null
 
     data class ActionRecord(
         val toolName: String,
@@ -51,6 +52,16 @@ class LoopDetector(
         )
         history.add(record)
 
+        val isUnknownDeath = result.status == com.example.aragon.domain.model.ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
+            result.terminationReason == "PROCESS_DIED_BEFORE_RESULT" ||
+            (result.errorType == "PROCESS_TERMINATED" && result.exitCode == -1)
+        if (isUnknownDeath) {
+            unreconciledUnknownAction = record
+        } else if (unreconciledUnknownAction != null && ToolDispatcher.isReadOnly(toolName, args)) {
+            // A read-only inspection tool executed against the environment: state has been reconciled
+            unreconciledUnknownAction = null
+        }
+
         val analysis = evaluateLoop(toolName, sig, record)
         if (analysis.isLooping) {
             consecutiveLoopDetections++
@@ -68,19 +79,6 @@ class LoopDetector(
     }
 
     private fun evaluateLoop(toolName: String, sig: String, record: ActionRecord): LoopAnalysis {
-        // 0. Defense against re-executing unobserved process death without state reconciliation
-        if (history.size >= 2) {
-            val prev = history[history.size - 2]
-            if (prev.exitCode == -1 && prev.argsSignature == sig && !prev.success) {
-                return LoopAnalysis(
-                    isLooping = true,
-                    loopType = LoopType.EXACT_REPETITION,
-                    reason = "Attempted blind re-execution of tool '$toolName' whose previous execution outcome was unobserved (UNKNOWN_AFTER_PROCESS_DEATH) without prior state reconciliation.",
-                    recommendedAction = "RECONCILE_OR_INSPECT_FIRST"
-                )
-            }
-        }
-
         // 1. Exact Repetition Check (same tool and exact arguments repeated)
         val recentSame = history.takeLast(maxSameActions)
         if (recentSame.size >= maxSameActions && recentSame.all { it.argsSignature == sig }) {
@@ -134,11 +132,13 @@ class LoopDetector(
             )
         }
 
-        // 5. Stagnation / No Progress Check (reading/inspecting files repeatedly without changes or progress)
+        // 5. Stagnation / No Progress Check (reading/inspecting the same files repeatedly without changes)
         if (history.size >= maxNoProgressSteps) {
             val lastN = history.takeLast(maxNoProgressSteps)
-            val readOnlyTools = setOf("file_list", "inspect_file", "search_files", "browser_session")
-            if (lastN.all { it.toolName in readOnlyTools }) {
+            val readOnlyTools = setOf("file_list", "inspect_file", "search_files", "browser_session", "file_read")
+            val allReadOnly = lastN.all { it.toolName in readOnlyTools }
+            val uniqueSigs = lastN.map { it.argsSignature }.distinct().size
+            if (allReadOnly && uniqueSigs <= 2) {
                 return LoopAnalysis(
                     isLooping = true,
                     loopType = LoopType.STAGNATION,
@@ -149,6 +149,28 @@ class LoopDetector(
         }
 
         return LoopAnalysis(isLooping = false, loopType = LoopType.NONE, recommendedAction = "CONTINUE")
+    }
+
+    @Synchronized
+    fun checkPreDispatch(toolName: String, args: String): LoopAnalysis? {
+        val sig = "$toolName:${normalizeArgs(args)}"
+        val unknown = unreconciledUnknownAction
+        if (unknown != null) {
+            // Read-only tools are always permitted to inspect and reconcile workspace state
+            if (ToolDispatcher.isReadOnly(toolName, args)) {
+                return null
+            }
+            // Blind repetition of the exact unverified mutation without prior inspection is blocked
+            if (sig == unknown.argsSignature) {
+                return LoopAnalysis(
+                    isLooping = true,
+                    loopType = LoopType.EXACT_REPETITION,
+                    reason = "Pre-dispatch intercept: Tool invocation '$toolName' previously terminated with UNKNOWN status (process death). Repeating the exact unverified mutation is blocked until current workspace state is reconciled via read-only inspection.",
+                    recommendedAction = "RECONCILE_OR_INSPECT_FIRST"
+                )
+            }
+        }
+        return null
     }
 
     private fun normalizeArgs(args: String): String {

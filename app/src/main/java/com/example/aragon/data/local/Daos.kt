@@ -106,19 +106,25 @@ interface ArtifactDao {
 
 @Dao
 interface ToolExecutionDao {
-    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId ORDER BY timestamp DESC")
+    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId ORDER BY timestamp DESC, requestedAt DESC, startedAt DESC, rowid DESC")
     fun getExecutionsForTaskFlow(taskId: String): Flow<List<ToolExecutionEntity>>
 
-    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId ORDER BY timestamp DESC LIMIT :limit")
+    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId ORDER BY timestamp DESC, requestedAt DESC, startedAt DESC, rowid DESC LIMIT :limit")
     suspend fun getRecentExecutions(taskId: String, limit: Int = 10): List<ToolExecutionEntity>
+
+    @Query("SELECT * FROM (SELECT * FROM tool_executions WHERE taskId = :taskId ORDER BY timestamp DESC, requestedAt DESC, startedAt DESC, rowid DESC LIMIT :limit) ORDER BY timestamp ASC, requestedAt ASC, startedAt ASC, rowid ASC")
+    suspend fun getRecentExecutionsChronological(taskId: String, limit: Int = 20): List<ToolExecutionEntity>
+
+    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId ORDER BY timestamp ASC, requestedAt ASC, startedAt ASC, rowid ASC")
+    suspend fun getAllExecutionsForTask(taskId: String): List<ToolExecutionEntity>
 
     @Query("SELECT * FROM tool_executions WHERE callId = :callId LIMIT 1")
     suspend fun getExecutionByCallId(callId: String): ToolExecutionEntity?
 
-    @Query("SELECT * FROM tool_executions WHERE status = :status ORDER BY timestamp ASC")
+    @Query("SELECT * FROM tool_executions WHERE status = :status ORDER BY timestamp ASC, requestedAt ASC, rowid ASC")
     suspend fun getExecutionsByStatus(status: String): List<ToolExecutionEntity>
 
-    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId AND status = :status ORDER BY timestamp ASC")
+    @Query("SELECT * FROM tool_executions WHERE taskId = :taskId AND status = :status ORDER BY timestamp ASC, requestedAt ASC, rowid ASC")
     suspend fun getExecutionsForTaskByStatus(taskId: String, status: String): List<ToolExecutionEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

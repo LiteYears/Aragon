@@ -308,6 +308,23 @@ object ToolCallParser {
     fun isClaimingExecutionWithoutToolCall(content: String): Boolean {
         if (content.isBlank()) return false
         val lower = content.lowercase()
+        // Retractions, apologies, and negative acknowledgments must NOT trigger unverified claim loops
+        val isCorrectionOrAcknowledgment = lower.contains("was incorrect") ||
+                lower.contains("was a mistake") ||
+                lower.contains("apologize") ||
+                lower.contains("my mistake") ||
+                lower.contains("did not create") ||
+                lower.contains("have not created") ||
+                lower.contains("haven't created") ||
+                lower.contains("did not execute") ||
+                lower.contains("have not executed") ||
+                lower.contains("haven't executed") ||
+                lower.contains("did not run") ||
+                lower.contains("haven't run") ||
+                lower.contains("failed to create") ||
+                lower.contains("yet to create")
+        if (isCorrectionOrAcknowledgment) return false
+
         val claimsAction = lower.contains("i have created") ||
                 lower.contains("i created") ||
                 lower.contains("i have written") ||
@@ -331,6 +348,57 @@ object ToolCallParser {
                 lower.contains("i will generate") ||
                 lower.contains("i am going to create")
         return claimsAction
+    }
+
+    /**
+     * Determines whether model output is merely a forward-looking execution announcement
+     * (e.g. "I will now create the file", "I am going to run the command") rather than
+     * a substantive final completion answer.
+     */
+    fun isGenericPreamble(content: String): Boolean {
+        val trimmed = content.trim().lowercase()
+        if (trimmed.isBlank()) return true
+        if (trimmed in setOf("done", "done.", "done!", "finished", "finished.", "complete", "complete.")) return false
+        if (detectCompletionClaim(trimmed)) return false
+        if (trimmed.length < 5) return true
+        val isForwardLooking = trimmed.startsWith("i will ") ||
+                trimmed.startsWith("i am going to ") ||
+                trimmed.startsWith("i'll ") ||
+                trimmed.startsWith("let me ") ||
+                trimmed.startsWith("now i will ") ||
+                trimmed.startsWith("i shall ")
+        return isForwardLooking && trimmed.length < 150
+    }
+
+    /**
+     * Determines whether model output asserts that the requested task has been accomplished.
+     */
+    fun detectCompletionClaim(content: String): Boolean {
+        val lower = content.lowercase()
+        return lower.contains("task completed") ||
+                lower.contains("task is complete") ||
+                lower.contains("task is now complete") ||
+                lower.contains("task has been completed") ||
+                lower.contains("task is done") ||
+                lower.contains("completed the task") ||
+                lower.contains("completed successfully") ||
+                lower.contains("finished successfully") ||
+                lower.contains("successfully created") ||
+                lower.contains("successfully generated") ||
+                lower.contains("successfully updated") ||
+                lower.contains("successfully executed") ||
+                lower.contains("objective is satisfied") ||
+                lower.contains("objective achieved") ||
+                lower.contains("all requested operations are complete") ||
+                lower.contains("successfully finished") ||
+                lower.contains("work is complete") ||
+                lower.contains("all done") ||
+                lower.contains("i'm done") ||
+                lower.contains("i am done") ||
+                lower.contains("everything is complete") ||
+                lower.contains("goal achieved") ||
+                lower.contains("has been created successfully") ||
+                lower.contains("have created the requested")
     }
 
     /**

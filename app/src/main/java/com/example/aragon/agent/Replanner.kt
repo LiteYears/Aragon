@@ -77,6 +77,40 @@ class Replanner {
                 )
             }
 
+            // 0.1 ARTIFACT_INVALID / VALIDATION_FAILED / STALE_ARTIFACT
+            if (result.errorType == "ARTIFACT_INVALID" || result.errorType == "STALE_ARTIFACT" || result.errorType == "VALIDATION_FAILED") {
+                val isDoc = toolName.contains("doc") || toolName.contains("word") || (result.errorMessage?.contains("DOCX") == true)
+                val isXls = toolName.contains("sheet") || toolName.contains("excel") || (result.errorMessage?.contains("XLSX") == true)
+                return when {
+                    isDoc -> ReplanDecision(
+                        type = ReplanDecisionType.FALLBACK_BUILTIN,
+                        explanation = "Artifact failed structural validation (${result.errorMessage ?: "invalid format"}). Switching to native validated OpenXML document_create tool with structured paragraphs and tables.",
+                        suggestedTool = "document_create",
+                        suggestedParameters = JSONObject().apply {
+                            put("filename", "/artifacts/report.docx")
+                            put("title", task.title)
+                        }.toString(),
+                        suggestedIntent = "Generate document using native validated OpenXML generator document_create."
+                    )
+                    isXls -> ReplanDecision(
+                        type = ReplanDecisionType.FALLBACK_BUILTIN,
+                        explanation = "Spreadsheet artifact failed structural validation (${result.errorMessage ?: "invalid format"}). Switching to native validated spreadsheet_create tool with structured sheets and rows.",
+                        suggestedTool = "spreadsheet_create",
+                        suggestedParameters = JSONObject().apply {
+                            put("filename", "/artifacts/data.xlsx")
+                            put("sheetName", "Data")
+                        }.toString(),
+                        suggestedIntent = "Generate spreadsheet workbook using native validated spreadsheet_create."
+                    )
+                    else -> ReplanDecision(
+                        type = ReplanDecisionType.REPAIR_CURRENT_STEP,
+                        explanation = "Delivered artifact failed structural validation: ${result.errorMessage ?: "corrupt or incomplete output"}. Inspect or recreate file using native tools.",
+                        suggestedTool = "inspect_file",
+                        suggestedIntent = "Inspect and recreate invalid artifact."
+                    )
+                }
+            }
+
             // A. TIMEOUTS: Apply exponential backoff and break operation into sub-steps
             if (result.timedOut || err.contains("timed out") || err.contains("timeout")) {
                 val attemptCount = failedApproaches.count { it.error.lowercase().contains("timeout") } + 1

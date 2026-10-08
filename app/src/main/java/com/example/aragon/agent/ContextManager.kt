@@ -1,6 +1,7 @@
 package com.example.aragon.agent
 
 import com.example.aragon.computer.WorkspacePathResolver
+import com.example.aragon.data.local.ToolExecutionEntity
 import com.example.aragon.domain.model.Artifact
 import com.example.aragon.domain.model.FailedApproach
 import com.example.aragon.domain.model.PlanStep
@@ -119,7 +120,11 @@ class ContextManager(
         planSteps: List<PlanStep>,
         recentToolResults: List<Pair<String, ToolResult>>,
         artifacts: List<Artifact>,
-        loopWarning: String? = null
+        loopWarning: String? = null,
+        verificationResult: VerificationResult? = null,
+        replanningDirective: String? = null,
+        unverifiedClaimFeedback: String? = null,
+        allExecutionSummaries: List<ToolExecutionEntity>? = null
     ): List<LlmMessage> {
         val messages = mutableListOf<LlmMessage>()
 
@@ -145,6 +150,63 @@ class ContextManager(
             appendLine("- Status: ${task.status}")
             appendLine("- Iteration: ${task.iteration}")
             appendLine("- Current Objective: ${task.currentObjective.ifBlank { task.title }}")
+
+            // Authoritative Objective Verification Ground Truth (Scenario E & Area 3: Ground Truth vs Model Inference)
+            appendLine("\n### OBJECTIVE VERIFICATION GROUND TRUTH (AUTHORITATIVE):")
+            if (verificationResult != null) {
+                val overallState = if (verificationResult.isVerified) "[SATISFIED ✓]" else "[INCOMPLETE / PENDING ✗]"
+                appendLine("- Verification State: $overallState")
+                appendLine("- Ground Truth Summary: ${verificationResult.summary}")
+                if (verificationResult.criteria.isNotEmpty()) {
+                    appendLine("- Goal Criteria Checklist:")
+                    verificationResult.criteria.forEach { crit ->
+                        val mark = if (crit.isSatisfied) "[SATISFIED ✓]" else "[PENDING ✗]"
+                        appendLine("  * $mark [${crit.targetType}] ${crit.description} (Evidence: ${crit.evidence.ifBlank { "None yet" }})")
+                    }
+                }
+                val failingChecks = verificationResult.checks.filter { !it.passed }
+                if (failingChecks.isNotEmpty()) {
+                    appendLine("- Unmet Checks On Disk:")
+                    failingChecks.forEach { chk ->
+                        appendLine("  * [UNMET] ${chk.name}: ${chk.details}")
+                    }
+                }
+            } else {
+                appendLine("- Verification State: [PENDING EVALUATION]")
+            }
+            appendLine("Note: The above verification state is computed independently by the runtime on disk. Textual claims of completion in dialogue are hypotheses and do NOT satisfy criteria.")
+
+            // Authoritative Prior Actions Ledger (Bounded to prevent context window exhaustion and deduplicated from inline recent observations)
+            val allExecs = allExecutionSummaries ?: emptyList()
+            val inlineCount = recentToolResults.takeLast(maxRecentResultsInline).size
+            val priorExecs = if (allExecs.size > inlineCount) {
+                allExecs.dropLast(inlineCount)
+            } else {
+                emptyList()
+            }
+
+            if (priorExecs.isNotEmpty()) {
+                appendLine("\n### PRIOR ACTIONS LEDGER (HISTORICAL):")
+                val maxPriorLedgerEntries = 20
+                if (priorExecs.size > maxPriorLedgerEntries) {
+                    val omittedCount = priorExecs.size - maxPriorLedgerEntries
+                    appendLine("... [$omittedCount earlier historical operations recorded in durable database; omitted from prompt to conserve context] ...")
+                }
+                val visiblePrior = priorExecs.takeLast(maxPriorLedgerEntries)
+                val baseIndex = priorExecs.size - visiblePrior.size
+                visiblePrior.forEachIndexed { idx, ex ->
+                    val statusMark = when (ex.status) {
+                        "SUCCEEDED" -> "[SUCCEEDED]"
+                        "FAILED" -> "[FAILED]"
+                        "CANCELLED" -> "[CANCELLED]"
+                        "UNKNOWN_AFTER_PROCESS_DEATH" -> "[UNKNOWN - PROCESS DIED]"
+                        else -> "[${ex.status}]"
+                    }
+                    val artStr = if (ex.artifacts.isNotEmpty()) " -> Artifacts: ${ex.artifacts.joinToString()}" else ""
+                    val errStr = if (!ex.errorMessage.isNullOrBlank()) " (${ex.errorMessage})" else ""
+                    appendLine("${baseIndex + idx + 1}. $statusMark ${ex.toolName} ${ex.argumentsJson.take(120)}$artStr$errStr (Exit: ${ex.exitCode})")
+                }
+            }
 
             if (planSteps.isNotEmpty()) {
                 appendLine("\n### HIERARCHICAL PLAN:")
@@ -176,8 +238,16 @@ class ContextManager(
                 }
             }
 
+            if (!replanningDirective.isNullOrBlank()) {
+                appendLine("\n🔄 REPLANNING DIRECTIVE: $replanningDirective")
+            }
+
             if (!loopWarning.isNullOrBlank()) {
                 appendLine("\n⚠️ RUNTIME DIRECTIVE: $loopWarning")
+            }
+
+            if (!unverifiedClaimFeedback.isNullOrBlank()) {
+                appendLine("\n⚠️ RUNTIME CORRECTION: $unverifiedClaimFeedback")
             }
         }
 
@@ -188,7 +258,7 @@ class ContextManager(
             )
         )
 
-        // 4. Recent tool executions with strictly compliant Assistant tool_call -> Tool observation pairs
+        // 4. Recent tool executions formatted with ToolExecutionObs (Scenario C, D, F, H)
         val resultsToInclude = recentToolResults.takeLast(maxRecentResultsInline)
         for ((toolName, result) in resultsToInclude) {
             val callName = if (toolName.isNotBlank()) toolName else result.toolName
@@ -215,90 +285,16 @@ class ContextManager(
                 continue
             }
 
-            val canonicalName = com.example.aragon.tools.ToolRegistry.resolveCanonicalToolName(callName)
-            val terminalState = when {
-                result.status == com.example.aragon.domain.model.ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH -> "UNKNOWN_AFTER_PROCESS_DEATH"
-                result.errorType == "PROCESS_TERMINATED" && result.terminationReason == "PROCESS_DIED_BEFORE_RESULT" -> "UNKNOWN_AFTER_PROCESS_DEATH"
-                result.errorType == "PROCESS_TERMINATED" -> "PROCESS_TERMINATED"
-                result.status == com.example.aragon.domain.model.ToolExecutionStatus.AWAITING_APPROVAL || result.terminationReason == "AWAITING_APPROVAL" -> "AWAITING_APPROVAL"
-                result.errorType == "OPENSANDBOX_SYNC_FAILED" -> "SANDBOX_SYNC_FAILURE"
-                result.errorType?.startsWith("OPENSANDBOX") == true -> "SANDBOX_FAILURE"
-                result.errorType == "MCP_ERROR" -> "MCP_FAILURE"
-                result.errorType == "ARTIFACT_INVALID" || result.errorType == "STALE_ARTIFACT" -> "ARTIFACT_INVALID"
-                result.cancelled || result.status == com.example.aragon.domain.model.ToolExecutionStatus.CANCELLED -> "CANCELLED"
-                result.success || result.status == com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED -> "SUCCEEDED"
-                else -> "FAILED"
-            }
-
-            val observationContent = buildString {
-                appendLine("=== TOOL OBSERVATION ===")
-                appendLine("Tool Call ID: ${result.callId}")
-                appendLine("Tool: $callName")
-                appendLine("Canonical Tool: $canonicalName")
-                if (callArgs != "{}") {
-                    appendLine("Normalized Arguments: $callArgs")
-                }
-                appendLine("Environment: ${result.environment} (${result.workingDirectory})")
-                appendLine("Terminal State: $terminalState")
-                val exitCodeDisplay = if (terminalState == "UNKNOWN_AFTER_PROCESS_DEATH") "None (Unobserved - Process Died Before Result)" else "${result.exitCode}"
-                appendLine("Status: ${result.status.name} (Success: ${result.success}, ExitCode: $exitCodeDisplay)")
-                if (!result.terminationReason.isNullOrBlank()) {
-                    appendLine("Termination Reason: ${result.terminationReason}")
-                }
-                if (result.durationMs > 0) {
-                    appendLine("Duration: ${result.durationMs}ms")
-                }
-                if (!result.errorType.isNullOrBlank()) {
-                    appendLine("Error Type: ${result.errorType}")
-                }
-                if (!result.errorMessage.isNullOrBlank()) {
-                    appendLine("Error Message: ${result.errorMessage}")
-                }
-                if (terminalState == "UNKNOWN_AFTER_PROCESS_DEATH") {
-                    appendLine("STATUS = UNKNOWN_AFTER_PROCESS_DEATH")
-                    appendLine("RESULT = NOT_OBSERVED")
-                    appendLine("RETRY = DO_NOT_BLINDLY_RETRY")
-                    appendLine("ACTION = RECONCILE_OR_INSPECT_FIRST")
-                    appendLine("Directive: Host process died before tool execution result was observed. External side effects (e.g. filesystem mutation, remote MCP call, sandbox command, or HTTP request) may have already taken effect. Do NOT blindly repeat non-idempotent mutations. Inspect current workspace/server state first (e.g. via file_list, inspect_file) to reconcile.")
-                }
-                if (result.artifacts.isNotEmpty()) {
-                    appendLine("Artifacts Produced: ${result.artifacts.joinToString()}")
-                    val diskVerification = result.artifacts.map { p ->
-                        val f = resolver.resolve(p)
-                        if (f.exists() && f.isFile) "$p (verified: ${f.length()}B)" else "$p (MISSING ON DISK)"
-                    }.joinToString("; ")
-                    appendLine("Artifact Verification: $diskVerification")
-                }
-                appendLine("Timestamp: ${result.completedAt}")
-                if (result.stdout.isNotBlank()) {
-                    val wasCappedAtCapture = result.stdout.contains("[STDOUT Capped") || result.stdout.contains("[STDOUT Truncated")
-                    val outTrunc = if (result.stdout.length > maxInlineOutputLength) {
-                        val storageNote = if (wasCappedAtCapture) {
-                            "Retained diagnostic buffer (${result.stdout.length} chars) stored in obs_${result.callId}.log (original process output exceeded retention limit)"
-                        } else {
-                            "Complete retained output (${result.stdout.length} chars) stored in obs_${result.callId}.log"
-                        }
-                        "${result.stdout.take(maxInlineOutputLength)}\n...[Inline output truncated at $maxInlineOutputLength chars. $storageNote]"
-                    } else {
-                        result.stdout
-                    }
-                    appendLine("STDOUT:\n$outTrunc")
-                }
-                if (result.stderr.isNotBlank()) {
-                    val wasCappedAtCapture = result.stderr.contains("[STDERR Capped") || result.stderr.contains("[STDERR Truncated")
-                    val errTrunc = if (result.stderr.length > maxInlineOutputLength) {
-                        val storageNote = if (wasCappedAtCapture) {
-                            "Retained error buffer (${result.stderr.length} chars) stored in obs_${result.callId}.log (stream exceeded retention limit)"
-                        } else {
-                            "Complete retained error (${result.stderr.length} chars) stored in obs_${result.callId}.log"
-                        }
-                        "${result.stderr.take(maxInlineOutputLength)}\n...[Inline error truncated at $maxInlineOutputLength chars. $storageNote]"
-                    } else {
-                        result.stderr
-                    }
-                    appendLine("STDERR:\n$errTrunc")
-                }
-            }
+            val toolExecutionObs = Observation.ToolExecutionObs.fromToolResult(
+                toolName = callName,
+                result = result,
+                resolver = resolver,
+                callArgsOverride = callArgs
+            )
+            val observationContent = toolExecutionObs.toFormattedPrompt(
+                maxInlineLength = maxInlineOutputLength,
+                resolver = resolver
+            )
 
             // Must have assistant message with matching toolCalls immediately before tool message
             messages.add(

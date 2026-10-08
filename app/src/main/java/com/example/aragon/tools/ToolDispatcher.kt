@@ -335,20 +335,74 @@ class ToolDispatcher(
     }
 
     companion object {
-        fun isIdempotentOperation(toolName: String, argumentsJson: String): Boolean {
+        enum class OperationSemantics {
+            READ_ONLY,
+            IDEMPOTENT_MUTATION,
+            NON_IDEMPOTENT_MUTATION,
+            UNKNOWN
+        }
+
+        fun classifyOperation(toolName: String, argumentsJson: String): OperationSemantics {
             val canonical = ToolRegistry.resolveCanonicalToolName(toolName)
             if (canonical in listOf(
                     "file_read", "file_list", "inspect_file", "search_files",
                     "artifact_inspect", "web_search", "web_fetch",
                     "json_query", "csv_analyze", "verify_objective"
                 )) {
-                return true
+                return OperationSemantics.READ_ONLY
             }
             if (canonical == "http_request") {
                 val method = runCatching { JSONObject(argumentsJson).optString("method", "GET").uppercase() }.getOrDefault("GET")
-                return method == "GET" || method == "HEAD" || method == "OPTIONS"
+                return when (method) {
+                    "GET", "HEAD", "OPTIONS" -> OperationSemantics.READ_ONLY
+                    "PUT", "DELETE" -> OperationSemantics.IDEMPOTENT_MUTATION
+                    else -> OperationSemantics.NON_IDEMPOTENT_MUTATION
+                }
             }
-            return false
+            if (canonical == "file_write") {
+                return OperationSemantics.IDEMPOTENT_MUTATION
+            }
+            if (canonical == "text_editor") {
+                val op = runCatching { JSONObject(argumentsJson).optString("operation", "").lowercase() }.getOrDefault("")
+                return when (op) {
+                    "view" -> OperationSemantics.READ_ONLY
+                    "write", "undo" -> OperationSemantics.IDEMPOTENT_MUTATION
+                    else -> OperationSemantics.NON_IDEMPOTENT_MUTATION
+                }
+            }
+            if (canonical in listOf("document_create", "spreadsheet_create", "archive_manage", "python_execute")) {
+                return OperationSemantics.NON_IDEMPOTENT_MUTATION
+            }
+            if (canonical == "run_command") {
+                val cmd = runCatching { JSONObject(argumentsJson).optString("command", "").trim().lowercase() }.getOrDefault("")
+                val firstWord = cmd.split(" ", "\t", "\n").firstOrNull().orEmpty()
+                return when {
+                    firstWord in setOf("ls", "cat", "head", "tail", "grep", "find", "wc", "stat", "file", "pwd", "whoami", "env", "which") -> OperationSemantics.READ_ONLY
+                    cmd.startsWith("git status") || cmd.startsWith("git log") || cmd.startsWith("git diff") || cmd.startsWith("git branch") -> OperationSemantics.READ_ONLY
+                    cmd.startsWith("mkdir -p") || cmd.startsWith("rm -f") || cmd.startsWith("touch ") -> OperationSemantics.IDEMPOTENT_MUTATION
+                    cmd.contains(">>") || cmd.startsWith("git commit") || cmd.startsWith("git push") || cmd.startsWith("curl -x post") || cmd.startsWith("curl -d") -> OperationSemantics.NON_IDEMPOTENT_MUTATION
+                    else -> OperationSemantics.UNKNOWN
+                }
+            }
+            return OperationSemantics.UNKNOWN
+        }
+
+        fun isReadOnly(toolName: String, argumentsJson: String): Boolean {
+            return classifyOperation(toolName, argumentsJson) == OperationSemantics.READ_ONLY
+        }
+
+        fun isIdempotent(toolName: String, argumentsJson: String): Boolean {
+            val sem = classifyOperation(toolName, argumentsJson)
+            return sem == OperationSemantics.READ_ONLY || sem == OperationSemantics.IDEMPOTENT_MUTATION
+        }
+
+        fun isMutating(toolName: String, argumentsJson: String): Boolean {
+            return !isReadOnly(toolName, argumentsJson)
+        }
+
+        @Deprecated("Use isReadOnly or isIdempotent explicitly")
+        fun isIdempotentOperation(toolName: String, argumentsJson: String): Boolean {
+            return isIdempotent(toolName, argumentsJson)
         }
     }
 }

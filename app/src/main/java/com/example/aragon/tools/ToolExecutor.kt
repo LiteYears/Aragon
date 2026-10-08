@@ -1068,7 +1068,9 @@ class ToolExecutor(
             stdout = details.trimEnd(),
             stderr = if (!report.isValid) report.details else "",
             durationMs = System.currentTimeMillis() - startTime,
-            workingDirectory = "/workspace"
+            workingDirectory = "/workspace",
+            errorType = if (!report.isValid) "ARTIFACT_INVALID" else null,
+            errorMessage = if (!report.isValid) report.details else null
         )
     }
 
@@ -1379,7 +1381,7 @@ OpenSandbox Resource Telemetry:
                 artifacts = emptyList(),
                 durationMs = System.currentTimeMillis() - startTime,
                 workingDirectory = "/artifacts",
-                errorType = "VALIDATION_FAILED",
+                errorType = "ARTIFACT_INVALID",
                 errorMessage = report.details
             )
         }
@@ -1483,7 +1485,9 @@ OpenSandbox Resource Telemetry:
             stderr = if (!report.isValid) report.details else "",
             durationMs = System.currentTimeMillis() - startTime,
             workingDirectory = "/artifacts",
-            artifacts = if (report.isValid) listOf(logicalPath) else emptyList()
+            artifacts = if (report.isValid) listOf(logicalPath) else emptyList(),
+            errorType = if (!report.isValid) "ARTIFACT_INVALID" else null,
+            errorMessage = if (!report.isValid) report.details else null
         )
     }
 
@@ -1798,7 +1802,9 @@ OpenSandbox Resource Telemetry:
                     stderr = if (!report.isValid) report.details else "",
                     durationMs = System.currentTimeMillis() - startTime,
                     workingDirectory = "/artifacts",
-                    artifacts = if (report.isValid) listOf(logicalArchive) else emptyList()
+                    artifacts = if (report.isValid) listOf(logicalArchive) else emptyList(),
+                    errorType = if (!report.isValid) "ARTIFACT_INVALID" else null,
+                    errorMessage = if (!report.isValid) report.details else null
                 )
             } else {
                 // extract_zip

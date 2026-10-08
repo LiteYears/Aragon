@@ -34,6 +34,7 @@ import com.example.aragon.domain.model.ToolExecutionStatus
 import com.example.aragon.llm.LlmProvider
 import com.example.aragon.llm.LlmRequest
 import com.example.aragon.tools.DocxGenerator
+import com.example.aragon.tools.OperationSemantics
 import com.example.aragon.tools.ToolDispatcher
 import com.example.aragon.tools.ToolRegistry
 import com.example.aragon.opensandbox.OpenSandboxManager
@@ -78,6 +79,7 @@ class SessionOrchestrator(
     private val activeSessions = ConcurrentHashMap<String, Job>()
     private val loopDetectors = ConcurrentHashMap<String, LoopDetector>()
     private val sessionLocks = ConcurrentHashMap<String, Mutex>()
+    private val artifactDao: com.example.aragon.data.local.ArtifactDao get() = artifactManager.artifactDao
 
     init {
         sessionScope.launch {
@@ -383,7 +385,17 @@ class SessionOrchestrator(
         val isFirstRun = planSteps.isEmpty() && priorExecutions.isEmpty() && task.iteration == 0
 
         // Snapshot workspace state at start of execution to distinguish pre-existing files from fresh task deliverables
-        val preExecutionBaseline = artifactManager.snapshotWorkspace(resolver)
+        val preExecutionBaseline = if (isFirstRun) {
+            val baseline = artifactManager.snapshotWorkspace(resolver)
+            artifactManager.saveInitialBaseline(resolver, baseline)
+            baseline
+        } else {
+            artifactManager.loadInitialBaseline(resolver) ?: run {
+                val baseline = artifactManager.snapshotWorkspace(resolver)
+                artifactManager.saveInitialBaseline(resolver, baseline)
+                baseline
+            }
+        }
 
         try {
             if (isFirstRun) {
@@ -454,7 +466,7 @@ class SessionOrchestrator(
                 )
                 if (initialVerification.isVerified) {
                     logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Already Satisfied ✓", initialVerification.summary)
-                    completeTask(task, initialVerification.summary, resolver, planSteps)
+                    task = completeTask(task, initialVerification.summary, resolver, planSteps, initialVerification.status)
                     activeSessions.remove(taskId)
                     return
                 }
@@ -501,8 +513,8 @@ class SessionOrchestrator(
                 }
             }
 
-            // Hydrate previous tool executions from Room so LLM and orchestrator retain real execution history
-            val persistedExecutions = toolExecutionDao.getRecentExecutions(taskId, 20).reversed()
+            // Hydrate previous tool executions from Room in strict chronological order
+            val persistedExecutions = toolExecutionDao.getRecentExecutionsChronological(taskId, 20)
             val recentToolResults = mutableListOf<Pair<String, ToolResult>>()
             for (pe in persistedExecutions) {
                 if (pe.status == ToolExecutionStatus.SUCCEEDED.name || 
@@ -518,6 +530,7 @@ class SessionOrchestrator(
             artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
 
             var loopWarning: String? = null
+            var unverifiedClaimFeedback: String? = null
             var currentIteration = task.iteration
             val maxIterations = preferencesManager.maxIterations.value
             var metrics = task.metrics
@@ -720,7 +733,7 @@ class SessionOrchestrator(
                     )
                     if (verification.isVerified) {
                         logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", verification.summary)
-                        completeTask(task, verification.summary, resolver, planSteps)
+                        task = completeTask(task, verification.summary, resolver, planSteps, verification.status)
                         break // STOP ITERATING IMMEDIATELY!
                     } else if (currentIteration >= 2) {
                         taskDao.updateTask(
@@ -738,7 +751,40 @@ class SessionOrchestrator(
                     continue
                 }
 
-                // LLM Context Preparation
+                // Pre-turn verification evaluation to provide authoritative ground truth to LLM
+                val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                val preTurnVerification = verificationEngine.verifyTaskObjective(
+                    task = task,
+                    resolver = resolver,
+                    registeredArtifacts = currentTaskArtifacts,
+                    preExecutionBaseline = preExecutionBaseline,
+                    recentToolResults = recentToolResults
+                )
+
+                // Check Replanner recommendation if the latest execution failed or loop warnings are active
+                val lastResult = recentToolResults.lastOrNull()?.second
+                val shouldReplan = (lastResult != null && !lastResult.success) || !loopWarning.isNullOrBlank()
+                val replanDecision = if (shouldReplan) {
+                    replanner.analyzeAndReplan(
+                        task = task,
+                        currentPlan = planSteps,
+                        failedApproaches = contextManager.getFailedApproaches(taskId),
+                        recentResults = recentToolResults,
+                        artifacts = artifacts,
+                        verificationResult = preTurnVerification,
+                        resolver = resolver
+                    )
+                } else null
+
+                val replanningDirective = if (replanDecision != null && replanDecision.type != ReplanDecisionType.CONTINUE_CURRENT_STEP && replanDecision.type != ReplanDecisionType.COMPLETE) {
+                    val toolHint = if (replanDecision.suggestedTool != null) " Suggested tool: ${replanDecision.suggestedTool}." else ""
+                    val paramsHint = if (replanDecision.suggestedParameters != null) " Parameters: ${replanDecision.suggestedParameters}." else ""
+                    "${replanDecision.explanation}$toolHint$paramsHint"
+                } else null
+
+                val allExecutionsForTask = toolExecutionDao.getAllExecutionsForTask(taskId)
+
+                // LLM Context Preparation with ground truth, full ledger, and replanner directives
                 val messages = contextManager.buildConversationMessages(
                     task = task,
                     project = project,
@@ -746,8 +792,13 @@ class SessionOrchestrator(
                     planSteps = planSteps,
                     recentToolResults = recentToolResults,
                     artifacts = artifacts,
-                    loopWarning = loopWarning
+                    loopWarning = loopWarning,
+                    verificationResult = preTurnVerification,
+                    replanningDirective = replanningDirective,
+                    unverifiedClaimFeedback = unverifiedClaimFeedback,
+                    allExecutionSummaries = allExecutionsForTask
                 )
+                unverifiedClaimFeedback = null
 
                 if (messages.size > 15) {
                     contextManager.compressContext(resolver, task, messages)
@@ -856,10 +907,8 @@ class SessionOrchestrator(
                             val existingExec = toolExecutionDao.getExecutionByCallId(rawId)
                             if (existingExec == null) {
                                 rawId
-                            } else if (existingExec.taskId != taskId) {
+                            } else if (existingExec.taskId != taskId || existingExec.iterationId != currentIteration) {
                                 "call_${taskId}_it${currentIteration}_${canonicalToolName}_${argsHash}_$occurrence"
-                            } else if (existingExec.toolName == canonicalToolName && areArgumentsEqual(existingExec.argumentsJson, tc.argumentsJson)) {
-                                rawId
                             } else {
                                 "${rawId}_it${currentIteration}_occ$occurrence"
                             }
@@ -875,9 +924,11 @@ class SessionOrchestrator(
                             status = ToolExecutionStatus.CREATED
                         )
 
-                        // Prevent duplicate execution if this call was already executed and completed
+                        // Prevent duplicate execution if this call was already executed and completed in THIS iteration
+                        // Read-only inspection tools must NEVER be skipped across iterations (Scenario B & 8)
                         val priorExecution = toolExecutionDao.getExecutionByCallId(callId)
-                        if (priorExecution != null && priorExecution.taskId == taskId && priorExecution.toolName == canonicalToolName &&
+                        val isReadOnly = ToolDispatcher.isReadOnly(canonicalToolName, tc.argumentsJson)
+                        if (!isReadOnly && priorExecution != null && priorExecution.taskId == taskId && priorExecution.toolName == canonicalToolName &&
                             areArgumentsEqual(priorExecution.argumentsJson, tc.argumentsJson) &&
                             (priorExecution.status == ToolExecutionStatus.SUCCEEDED.name || 
                              priorExecution.status == ToolExecutionStatus.FAILED.name || 
@@ -934,6 +985,42 @@ class SessionOrchestrator(
                             toolCallId = callId
                         )
 
+                        // Pre-dispatch intercept: Prevent blind repetition of mutations after UNKNOWN_AFTER_PROCESS_DEATH (Scenario I & 8)
+                        val preDispatchLoop = loopDetector.checkPreDispatch(canonicalToolName, tc.argumentsJson)
+                        if (preDispatchLoop != null) {
+                            val blockedEntity = ToolExecutionEntity(
+                                callId = callId,
+                                taskId = taskId,
+                                toolName = canonicalToolName,
+                                argumentsJson = tc.argumentsJson,
+                                success = false,
+                                exitCode = 1,
+                                stdout = "",
+                                stderr = preDispatchLoop.reason,
+                                durationMs = 0L,
+                                workingDirectory = resolver.workspaceDir.absolutePath,
+                                errorType = "UNKNOWN_RETRY_BLOCKED",
+                                errorMessage = preDispatchLoop.reason,
+                                requestedAt = toolCall.requestedAt,
+                                dispatchedAt = System.currentTimeMillis(),
+                                startedAt = System.currentTimeMillis(),
+                                completedAt = System.currentTimeMillis(),
+                                status = ToolExecutionStatus.FAILED.name,
+                                artifacts = emptyList()
+                            )
+                            toolExecutionDao.insertExecution(blockedEntity)
+                            contextManager.storeObservation(resolver, callId, "", preDispatchLoop.reason)
+                            recentToolResults.add(Pair(canonicalToolName, blockedEntity.toDomainResult()))
+                            logEvent(
+                                taskId = taskId,
+                                type = TimelineEventType.ERROR,
+                                title = "Blind Mutation Blocked After UNKNOWN",
+                                details = preDispatchLoop.reason,
+                                toolCallId = callId
+                            )
+                            break
+                        }
+
                         // 3. EXECUTION WITH RESILIENT RETRY & EXPONENTIAL BACKOFF
                         var currentAttempt = 0
                         val maxTransientRetries = 2
@@ -977,9 +1064,10 @@ class SessionOrchestrator(
                                     break
                                 }
 
-                                // CRITICAL: Non-idempotent operations must NEVER be automatically retried on unconfirmed transient errors
-                                val isIdempotent = ToolDispatcher.isIdempotentOperation(canonicalToolName, tc.argumentsJson)
-                                if (!isIdempotent) {
+                                // CRITICAL: Only READ_ONLY or IDEMPOTENT_MUTATION operations may be retried on transient errors
+                                val semantics = ToolDispatcher.classifyOperation(canonicalToolName, tc.argumentsJson)
+                                val isRetrySafe = semantics == OperationSemantics.READ_ONLY || semantics == OperationSemantics.IDEMPOTENT_MUTATION
+                                if (!isRetrySafe) {
                                     break
                                 }
 
@@ -1147,36 +1235,49 @@ class SessionOrchestrator(
                         // Update current active phase and subtask progress
                         advancePlanStepProgress(taskId, canonicalToolName, tc.argumentsJson, toolResult.copy(artifacts = verifiedArtifacts), resolver, task)
 
-                        // CRITICAL CHECK: DOES CURRENT EVIDENCE SATISFY THE GOAL?
-                        val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
-                        val postToolVerification = verificationEngine.verifyTaskObjective(
-                            task = task,
-                            resolver = resolver,
-                            registeredArtifacts = currentTaskArtifacts,
-                            preExecutionBaseline = preExecutionBaseline
-                        )
-                        if (postToolVerification.isVerified) {
-                            val goalSummary = if (canonicalToolName == "complete_task") {
-                                runCatching { org.json.JSONObject(tc.argumentsJson).optString("summary", postToolVerification.summary) }.getOrDefault(postToolVerification.summary)
+                        // If the agent explicitly called complete_task, evaluate verification immediately
+                        if (canonicalToolName == "complete_task") {
+                            val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                            val postToolVerification = verificationEngine.verifyTaskObjective(
+                                task = task,
+                                resolver = resolver,
+                                registeredArtifacts = currentTaskArtifacts,
+                                preExecutionBaseline = preExecutionBaseline,
+                                recentToolResults = recentToolResults,
+                                llmResponseContent = toolResult.stdout
+                            )
+                            if (postToolVerification.isVerified) {
+                                val goalSummary = runCatching { org.json.JSONObject(tc.argumentsJson).optString("summary", postToolVerification.summary) }.getOrDefault(postToolVerification.summary)
+                                logEvent(
+                                    taskId,
+                                    TimelineEventType.GOAL_COMPLETED,
+                                    "Goal Achieved ✓",
+                                    goalSummary
+                                )
+                                task = completeTask(task, goalSummary, resolver, planSteps, postToolVerification.status)
+                                goalAchievedDuringTools = true
+                                break // STOP IMMEDIATELY! NO MORE TOOLS OR LOOPS!
                             } else {
-                                postToolVerification.summary
+                                logEvent(
+                                    taskId,
+                                    TimelineEventType.ERROR,
+                                    "Completion Rejected: Unmet Criteria",
+                                    "The agent called complete_task, but objective verification failed: ${postToolVerification.summary}."
+                                )
                             }
+                        }
+
+                        // If host process died and outcome is UNKNOWN, halt remaining tools in batch to force state reconciliation (Scenario H & I)
+                        if (toolResult.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
+                            toolResult.terminationReason == "PROCESS_DIED_BEFORE_RESULT") {
                             logEvent(
-                                taskId,
-                                TimelineEventType.GOAL_COMPLETED,
-                                "Goal Achieved ✓",
-                                "All success criteria met after executing $canonicalToolName. Deliverables verified on disk."
+                                taskId = taskId,
+                                type = TimelineEventType.ERROR,
+                                title = "Host Process Died: UNKNOWN Outcome",
+                                details = "Halting remaining tool invocations in this batch. Forcing state reconciliation.",
+                                toolCallId = callId
                             )
-                            completeTask(task, goalSummary, resolver, planSteps)
-                            goalAchievedDuringTools = true
-                            break // STOP IMMEDIATELY! NO MORE TOOLS OR LOOPS!
-                        } else if (canonicalToolName == "complete_task") {
-                            logEvent(
-                                taskId,
-                                TimelineEventType.ERROR,
-                                "Completion Rejected: Unmet Criteria",
-                                "The agent called complete_task, but objective verification failed: ${postToolVerification.summary}. Deliverables are missing from disk."
-                            )
+                            break
                         }
 
                         // LOOP / STAGNATION DETECTION
@@ -1187,7 +1288,7 @@ class SessionOrchestrator(
                             logEvent(taskId, TimelineEventType.ERROR, "Loop Detected (${loopAnalysis.loopType})", loopAnalysis.reason)
 
                             if (loopAnalysis.shouldTerminateBlocked) {
-                                taskDao.updateTask(
+                                safeUpdateTask(
                                     TaskEntity.fromDomain(
                                         task.copy(
                                             status = TaskStatus.BLOCKED,
@@ -1206,18 +1307,26 @@ class SessionOrchestrator(
                             }
 
                             // Replanning triggered by loop
-                            taskDao.updateStatus(taskId, TaskStatus.REPLANNING)
+                            safeUpdateStatus(taskId, TaskStatus.REPLANNING)
+                            val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                            val currentVerification = verificationEngine.verifyTaskObjective(
+                                task = task,
+                                resolver = resolver,
+                                registeredArtifacts = currentTaskArtifacts,
+                                preExecutionBaseline = preExecutionBaseline,
+                                recentToolResults = recentToolResults
+                            )
                             val decision = replanner.analyzeAndReplan(
                                 task, planSteps, contextManager.getFailedApproaches(taskId),
-                                recentToolResults, currentDiscovered, null, resolver
+                                recentToolResults, currentDiscovered, currentVerification, resolver
                             )
 
                             if (decision.type == ReplanDecisionType.COMPLETE) {
-                                completeTask(task, decision.explanation, resolver, planSteps)
+                                task = completeTask(task, decision.explanation, resolver, planSteps, currentVerification.status)
                                 goalAchievedDuringTools = true
                                 break
                             } else if (decision.type == ReplanDecisionType.ABORT) {
-                                taskDao.updateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.BLOCKED, lastError = decision.explanation)))
+                                safeUpdateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.BLOCKED, lastError = decision.explanation)))
                                 logEvent(taskId, TimelineEventType.ERROR, "Strategies Exhausted", decision.explanation)
                                 activeSessions.remove(taskId)
                                 return
@@ -1232,49 +1341,69 @@ class SessionOrchestrator(
                     if (goalAchievedDuringTools) {
                         break // Break out of while loop
                     }
+
+                    // Post-turn verification: check if all tools in turn executed and objective criteria are met
+                    val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                    val postTurnVerification = verificationEngine.verifyTaskObjective(
+                        task = task,
+                        resolver = resolver,
+                        registeredArtifacts = currentTaskArtifacts,
+                        preExecutionBaseline = preExecutionBaseline,
+                        recentToolResults = recentToolResults,
+                        llmResponseContent = response.content
+                    )
+                    if (postTurnVerification.isVerified && response.content.isNotBlank() && !com.example.aragon.llm.ToolCallParser.isGenericPreamble(response.content)) {
+                        logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { postTurnVerification.summary })
+                        task = completeTask(task, response.content.ifBlank { postTurnVerification.summary }, resolver, planSteps, postTurnVerification.status)
+                        break
+                    }
                 } else {
                     // Model finished generating text without tool calls
                     logEvent(taskId, TimelineEventType.RESULT, "Model Response", response.content)
 
-                    // Invariant check: Detect conversational claims pretending to execute without tools
-                    if (com.example.aragon.llm.ToolCallParser.isClaimingExecutionWithoutToolCall(response.content)) {
+                    val isClaimingWithoutExecution = com.example.aragon.llm.ToolCallParser.isClaimingExecutionWithoutToolCall(response.content)
+                    if (isClaimingWithoutExecution) {
+                        val claimWarning = "Model described actions or claimed completion in conversational text without invoking a structured tool. No actions executed."
                         logEvent(
                             taskId,
                             TimelineEventType.ERROR,
                             "Unverified Prose Claim",
-                            "Model described actions in conversational text without invoking a structured tool. No actions executed."
+                            claimWarning
                         )
                         contextManager.recordFailedApproach(
                             taskId = taskId,
                             strategy = "conversational_claim_without_tool",
-                            error = "Model generated plain text describing work instead of structured tool call",
+                            error = claimWarning,
                             context = response.content.take(200)
                         )
+                        unverifiedClaimFeedback = "In the previous turn, you described actions or claimed completion in conversational text without invoking a structured tool. No actions were executed and no files were created. Do not output conversational apologies or explanations. Immediately invoke a structured tool (e.g. document_create, file_write, run_command) using the tool call format to perform the action."
                     }
 
-                    taskDao.updateStatus(taskId, TaskStatus.VERIFYING)
+                    safeUpdateStatus(taskId, TaskStatus.VERIFYING)
                     val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
                     val verification = verificationEngine.verifyTaskObjective(
                         task = task,
                         resolver = resolver,
                         registeredArtifacts = currentTaskArtifacts,
-                        preExecutionBaseline = preExecutionBaseline
+                        preExecutionBaseline = preExecutionBaseline,
+                        recentToolResults = recentToolResults,
+                        llmResponseContent = response.content
                     )
 
                     if (verification.isVerified) {
                         logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { verification.summary })
-                        completeTask(task, response.content.ifBlank { verification.summary }, resolver, planSteps)
+                        task = completeTask(task, response.content.ifBlank { verification.summary }, resolver, planSteps, verification.status)
                         break
                     } else {
-                        // Deliverables are missing and model did not call tools
+                        // Deliverables or criteria are unmet and model did not call tools
                         logEvent(
                             taskId,
                             TimelineEventType.REASONING,
-                            "Tool Execution Mandate",
-                            "Objective criteria unmet (${verification.summary}). You must call structured tools (e.g. document_create, file_write, run_command) to produce deliverables."
+                            "Objective Verification Unmet",
+                            "Objective criteria unmet (${verification.summary}). You must call structured tools (e.g. document_create, file_write, run_command) to satisfy requirements."
                         )
                         if (currentIteration >= maxIterations - 1) {
-                            taskDao.updateTask(
+                            safeUpdateTask(
                                 TaskEntity.fromDomain(
                                     task.copy(
                                         status = TaskStatus.FAILED,
@@ -1283,7 +1412,7 @@ class SessionOrchestrator(
                                 )
                             )
                             logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", verification.summary)
-                            logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", "Required deliverables were not created on disk via tools.")
+                            logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", "Required criteria were not satisfied: ${verification.summary}")
                             break
                         }
                     }
@@ -1293,10 +1422,11 @@ class SessionOrchestrator(
                 delay(200)
             }
 
-            if (currentIteration >= maxIterations && task.status.isActive) {
-                taskDao.updateTask(
+            val currentDbTask = taskDao.getTaskById(taskId)
+            if (currentIteration >= maxIterations && currentDbTask != null && currentDbTask.status.isActive) {
+                safeUpdateTask(
                     TaskEntity.fromDomain(
-                        task.copy(
+                        currentDbTask.toDomain().copy(
                             status = TaskStatus.BLOCKED,
                             lastError = "Exceeded iteration limit ($maxIterations) without verified outcome."
                         )
@@ -1308,8 +1438,11 @@ class SessionOrchestrator(
             // Re-throw to cooperate with structured concurrency and cancellation
             throw e
         } catch (e: Exception) {
-            taskDao.updateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.FAILED, lastError = e.message)))
-            logEvent(taskId, TimelineEventType.ERROR, "Runtime Exception", e.message ?: "Unknown error")
+            val currentTask = taskDao.getTaskById(taskId)
+            if (currentTask != null && !currentTask.status.isTerminal) {
+                safeUpdateTask(TaskEntity.fromDomain(currentTask.toDomain().copy(status = TaskStatus.FAILED, lastError = e.message)))
+                logEvent(taskId, TimelineEventType.ERROR, "Runtime Exception", e.message ?: "Unknown error")
+            }
         } finally {
             coroutineContext[Job]?.let { activeSessions.remove(taskId, it) }
         }
@@ -1443,8 +1576,9 @@ class SessionOrchestrator(
                     val newSubtaskIndex = (activeStep.activeSubtaskIndex + 1).coerceAtMost(activeStep.subtasks.size)
                     val hasRealArtifacts = toolResult.artifacts.isNotEmpty() ||
                         artifactManager.discoverArtifacts(taskId, resolver).any { it.valid && it.existsOnDisk }
+                    val isCommandOrQuery = verificationEngine.deriveGoalCriteria(task).any { it.targetType == "COMMAND_OR_QUERY" }
 
-                    val isAllSubtasksDone = newSubtaskIndex >= activeStep.subtasks.size && hasRealArtifacts
+                    val isAllSubtasksDone = newSubtaskIndex >= activeStep.subtasks.size && (hasRealArtifacts || isCommandOrQuery)
 
                     if (isAllSubtasksDone) {
                         planStepDao.updateStep(
@@ -1454,7 +1588,7 @@ class SessionOrchestrator(
                                 completedAt = System.currentTimeMillis(),
                                 activeSubtaskIndex = activeStep.subtasks.size,
                                 toolName = toolName,
-                                nextIntent = "Execution & synthesis phase completed. Deliverables ready on disk."
+                                nextIntent = "Execution & synthesis phase completed. Solution executed successfully."
                             )
                         )
                         val nextStep = steps.find { it.stepNumber == 4 }
@@ -1474,7 +1608,7 @@ class SessionOrchestrator(
                                 activeSubtaskIndex = newSubtaskIndex.coerceAtMost(activeStep.subtasks.size - 1),
                                 toolName = toolName,
                                 attemptCount = activeStep.attemptCount + 1,
-                                nextIntent = if (hasRealArtifacts) "Advancing solution execution subtasks." else "Awaiting product deliverable generation on disk."
+                                nextIntent = if (hasRealArtifacts || isCommandOrQuery) "Advancing solution execution subtasks." else "Awaiting product deliverable generation on disk."
                             )
                         )
                     }
@@ -1496,7 +1630,9 @@ class SessionOrchestrator(
                 val verification = verificationEngine.verifyTaskObjective(
                     task = task,
                     resolver = resolver,
-                    registeredArtifacts = currentTaskArtifacts
+                    registeredArtifacts = currentTaskArtifacts,
+                    recentToolResults = listOf(Pair(toolName, toolResult)),
+                    llmResponseContent = toolResult.stdout
                 )
                 if (verification.isVerified) {
                     planStepDao.updateStep(
@@ -1594,83 +1730,165 @@ class SessionOrchestrator(
         task: Task,
         summary: String,
         resolver: WorkspacePathResolver,
-        planSteps: List<PlanStep>
-    ) {
-        taskDao.updateStatus(task.id, TaskStatus.COMPLETING)
+        planSteps: List<PlanStep>,
+        verification: ObjectiveVerification = ObjectiveVerification.Satisfied(summary, emptyList())
+    ): Task {
+        // Monotonic guard: If task is already completed, do not re-complete
+        val currentDbTask = taskDao.getTaskById(task.id)
+        if (currentDbTask?.status == TaskStatus.COMPLETED) {
+            return currentDbTask.toDomain()
+        }
 
-        // Synchronize any pending OpenSandbox files before finalizing deliverables
-        val mgr = getSandboxManager()
-        runCatching {
-            mgr?.syncSandboxToLocal(resolver)
+        val finalStatus = when (verification) {
+            is ObjectiveVerification.Satisfied -> TaskStatus.COMPLETED
+            is ObjectiveVerification.NotSatisfied -> TaskStatus.FAILED
+            is ObjectiveVerification.Inconclusive -> TaskStatus.BLOCKED
         }
 
         // Deliver product artifacts that actually exist on disk and pass validation
-        var products = artifactManager.discoverArtifacts(task.id, resolver)
-            .filter { it.stage == com.example.aragon.domain.model.ArtifactStage.PRODUCT && it.valid && it.existsOnDisk }
+        var products = runCatching {
+            artifactManager.discoverArtifacts(task.id, resolver)
+                .filter { it.stage == com.example.aragon.domain.model.ArtifactStage.PRODUCT && it.valid && it.existsOnDisk }
+        }.getOrDefault(emptyList())
 
         // Fallback: If no PRODUCT stage artifacts were found, include all valid workspace deliverables on disk
         if (products.isEmpty()) {
-            products = artifactManager.discoverArtifacts(task.id, resolver).filter { it.valid && it.existsOnDisk }
+            products = runCatching {
+                artifactManager.discoverArtifacts(task.id, resolver).filter { it.valid && it.existsOnDisk }
+            }.getOrDefault(emptyList())
         }
 
-        // Ensure every real product deliverable exists in both local workspace and OpenSandbox microVM
-        for (prod in products) {
-            val realFile = resolver.resolve(prod.logicalPath)
-            if (realFile.exists() && realFile.isFile) {
-                val ext = realFile.extension.lowercase()
-                val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
-                if (!isBinary) {
-                    runCatching {
+        val completedSummary = summary.trim().ifBlank {
+            if (task.finalSummary.isNotBlank()) task.finalSummary else verification.summary
+        }
+
+        // ==========================================
+        // 1. COMPLETION COMMIT TRANSACTION BOUNDARY
+        // ==========================================
+        // Objective is already verified by VerificationEngine.
+        // Commit final status to Room DB immediately so post-completion operations cannot downgrade it.
+        val completedTask = task.copy(
+            status = finalStatus,
+            finalSummary = completedSummary,
+            metrics = task.metrics.copy(artifactsProduced = products.size),
+            lastError = if (finalStatus == TaskStatus.FAILED) completedSummary else null,
+            updatedAt = System.currentTimeMillis()
+        )
+        safeUpdateTask(TaskEntity.fromDomain(completedTask))
+
+        // ==========================================
+        // 2. POST-COMPLETION FINALIZATION (NON-FATAL)
+        // ==========================================
+
+        // A. Post-completion OpenSandbox workspace mirror (best-effort; failure cannot downgrade task)
+        runCatching {
+            val mgr = getSandboxManager()
+            mgr?.syncSandboxToLocal(resolver)
+            for (prod in products) {
+                val realFile = resolver.resolve(prod.logicalPath)
+                if (realFile.exists() && realFile.isFile) {
+                    val ext = realFile.extension.lowercase()
+                    val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
+                    if (!isBinary) {
                         val text = realFile.readText()
                         mgr?.writeFile(prod.logicalPath, text)
                         mgr?.writeFile(prod.logicalPath.removePrefix("/workspace/").removePrefix("/"), text)
                     }
                 }
             }
+        }.onFailure { e ->
+            logEvent(task.id, TimelineEventType.OBSERVATION, "Sandbox Sync Warning", "Post-completion sandbox mirror warning: ${e.message}")
         }
 
-        val finalStatus = if (products.isNotEmpty()) TaskStatus.COMPLETED else TaskStatus.FAILED
-
-        // Mark plan steps completed only if task actually succeeded with real deliverables
-        val steps = planStepDao.getStepsForTask(task.id)
-        for (step in steps) {
-            val stepStatus = if (finalStatus == TaskStatus.COMPLETED) {
-                StepStatus.COMPLETED
-            } else {
-                if (step.status == StepStatus.IN_PROGRESS || step.status == StepStatus.PENDING) StepStatus.FAILED else step.status
+        // B. Post-completion plan-step status updates (truthful resolution; failure cannot downgrade task)
+        runCatching {
+            val steps = planStepDao.getStepsForTask(task.id)
+            for (step in steps) {
+                val stepStatus = when {
+                    finalStatus == TaskStatus.COMPLETED -> {
+                        when (step.status) {
+                            StepStatus.COMPLETED -> StepStatus.COMPLETED
+                            StepStatus.IN_PROGRESS -> StepStatus.COMPLETED
+                            StepStatus.PENDING -> StepStatus.SKIPPED
+                            else -> step.status // Preserve prior FAILED or BLOCKED status
+                        }
+                    }
+                    else -> {
+                        if (step.status == StepStatus.IN_PROGRESS || step.status == StepStatus.PENDING) StepStatus.FAILED else step.status
+                    }
+                }
+                val stepVerified = stepStatus == StepStatus.COMPLETED
+                planStepDao.updateStep(
+                    step.copy(
+                        status = stepStatus,
+                        verified = stepVerified,
+                        completedAt = if (stepVerified && step.completedAt == null) System.currentTimeMillis() else step.completedAt,
+                        activeSubtaskIndex = if (stepVerified) step.subtasks.size else step.activeSubtaskIndex,
+                        nextIntent = when (stepStatus) {
+                            StepStatus.COMPLETED -> "Completed."
+                            StepStatus.SKIPPED -> "Skipped: objective was satisfied in earlier step."
+                            StepStatus.FAILED -> "Failed during execution (objective independently satisfied)."
+                            else -> step.nextIntent
+                        }
+                    )
+                )
             }
-            val stepVerified = finalStatus == TaskStatus.COMPLETED
-            planStepDao.updateStep(
-                step.copy(
-                    status = stepStatus,
-                    verified = stepVerified,
-                    completedAt = if (stepVerified) System.currentTimeMillis() else step.completedAt,
-                    activeSubtaskIndex = if (stepVerified) step.subtasks.size else step.activeSubtaskIndex,
-                    nextIntent = if (stepVerified) "Completed." else "Failed: deliverable verification unmet."
-                )
-            )
+        }.onFailure { e ->
+            logEvent(task.id, TimelineEventType.OBSERVATION, "Plan Step Warning", "Post-completion plan step update warning: ${e.message}")
         }
 
-        taskDao.updateTask(
-            TaskEntity.fromDomain(
-                task.copy(
-                    status = finalStatus,
-                    finalSummary = summary,
-                    metrics = task.metrics.copy(artifactsProduced = products.size),
-                    lastError = if (products.isEmpty()) "Required deliverables were not produced on disk." else null
-                )
-            )
-        )
-
-        checkpointManager.saveCheckpoint(task, planSteps, products, resolver)
-        if (products.isNotEmpty()) {
-            logEvent(task.id, TimelineEventType.VERIFICATION, "Objective Verified ✓", summary)
-            logEvent(task.id, TimelineEventType.TASK_COMPLETED, "Goal Achieved & Delivered", "Delivered ${products.size} product deliverable(s).")
-            logEvent(task.id, TimelineEventType.STATUS_CHANGE, "Session Terminated: SUCCESS", "Execution loop halted authoritatively with ${products.size} deliverable(s).")
-        } else {
-            logEvent(task.id, TimelineEventType.ERROR, "Delivery Failed", "Execution halted: 0 product deliverables were generated.")
-            logEvent(task.id, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", "Required deliverables were not produced on disk.")
+        // C. Post-completion checkpoint save (non-fatal)
+        runCatching {
+            checkpointManager.saveCheckpoint(completedTask, planSteps, products, resolver)
+        }.onFailure { e ->
+            logEvent(task.id, TimelineEventType.OBSERVATION, "Checkpoint Warning", "Post-completion checkpoint save warning: ${e.message}")
         }
+
+        // D. Post-completion event logging (non-fatal)
+        runCatching {
+            if (finalStatus == TaskStatus.COMPLETED) {
+                logEvent(task.id, TimelineEventType.VERIFICATION, "Objective Verified ✓", completedSummary)
+                logEvent(task.id, TimelineEventType.TASK_COMPLETED, "Goal Achieved & Delivered",
+                    if (products.isNotEmpty()) "Delivered ${products.size} product deliverable(s)." else "Execution completed successfully with verified outcome.")
+                logEvent(task.id, TimelineEventType.STATUS_CHANGE, "Session Terminated: SUCCESS",
+                    "Execution loop halted authoritatively: $completedSummary")
+            } else {
+                logEvent(task.id, TimelineEventType.ERROR, "Delivery Failed", "Execution halted: $completedSummary")
+                logEvent(task.id, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", completedSummary)
+            }
+        }
+
+        return completedTask
+    }
+
+    private suspend fun safeUpdateTask(taskEntity: TaskEntity) {
+        val current = taskDao.getTaskById(taskEntity.id)
+        if (current == null) {
+            taskDao.updateTask(taskEntity)
+            return
+        }
+        if (current.status.isTerminal) {
+            // Terminal state lifecycle monotonicity: status CANNOT transition away from terminal state
+            if (taskEntity.status != current.status) {
+                // Reject downgrade or lifecycle transition away from terminal state
+                return
+            }
+            // Allow legitimate metadata updates (finalSummary, metrics, timestamps, warnings)
+            val preservedSummary = if (taskEntity.finalSummary.isNullOrBlank()) current.finalSummary else taskEntity.finalSummary
+            val mergedEntity = taskEntity.copy(finalSummary = preservedSummary)
+            taskDao.updateTask(mergedEntity)
+            return
+        }
+        taskDao.updateTask(taskEntity)
+    }
+
+    private suspend fun safeUpdateStatus(taskId: String, status: TaskStatus) {
+        val current = taskDao.getTaskById(taskId)
+        if (current?.status?.isTerminal == true && status != current.status) {
+            // Monotonic terminal state invariant: Never overwrite or downgrade a terminal task
+            return
+        }
+        taskDao.updateStatus(taskId, status)
     }
 
     private suspend fun executeDeterministicStep(

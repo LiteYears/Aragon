@@ -14,7 +14,10 @@ class ToolRegistry {
 
     fun getTool(name: String): ToolDefinition? = tools[name] ?: tools[resolveCanonicalToolName(name)]
 
-    fun getAllTools(): List<ToolDefinition> = tools.values.toList()
+    fun getAllTools(): List<ToolDefinition> {
+        val aliases = setOf("docx_generate", "edit_file")
+        return tools.values.filter { it.name !in aliases }
+    }
 
     companion object {
         fun resolveCanonicalToolName(name: String): String {
