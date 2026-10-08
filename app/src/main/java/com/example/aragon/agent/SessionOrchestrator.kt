@@ -34,7 +34,7 @@ import com.example.aragon.domain.model.ToolExecutionStatus
 import com.example.aragon.llm.LlmProvider
 import com.example.aragon.llm.LlmRequest
 import com.example.aragon.tools.DocxGenerator
-import com.example.aragon.tools.OperationSemantics
+import com.example.aragon.tools.ToolDispatcher.Companion.OperationSemantics
 import com.example.aragon.tools.ToolDispatcher
 import com.example.aragon.tools.ToolRegistry
 import com.example.aragon.opensandbox.OpenSandboxManager
@@ -365,6 +365,944 @@ class SessionOrchestrator(
         activeSessions[taskId] = newJob
     }
 
+    private sealed class PipelineInitOutcome {
+        data class Ready(val task: Task, val planSteps: List<PlanStep>) : PipelineInitOutcome()
+        object Halted : PipelineInitOutcome()
+        object AlreadyCompleted : PipelineInitOutcome()
+    }
+
+    private sealed class DeterministicStepOutcome {
+        data class GoalCompleted(val task: Task) : DeterministicStepOutcome()
+        object FailedAndHalted : DeterministicStepOutcome()
+        object ContinueToNextIteration : DeterministicStepOutcome()
+    }
+
+    private sealed class ToolExecutionSingleResult {
+        data class Success(val toolResult: ToolResult, val verifiedArtifacts: List<String>) : ToolExecutionSingleResult()
+        object AwaitingApproval : ToolExecutionSingleResult()
+    }
+
+    private sealed class IterationToolsOutcome {
+        data class GoalCompleted(val task: Task) : IterationToolsOutcome()
+        data class Done(val task: Task, val loopWarning: String?, val shouldBreak: Boolean) : IterationToolsOutcome()
+        object SessionTerminated : IterationToolsOutcome()
+        object AwaitingApproval : IterationToolsOutcome()
+    }
+
+    private sealed class TextResponseOutcome {
+        data class GoalCompleted(val task: Task) : TextResponseOutcome()
+        object FailedAndHalted : TextResponseOutcome()
+        data class ContinueToNext(val unverifiedClaimFeedback: String?) : TextResponseOutcome()
+    }
+
+    private suspend fun initializePipelineSession(
+        task: Task,
+        resolver: WorkspacePathResolver,
+        isFirstRun: Boolean,
+        initialPlanSteps: List<PlanStep>,
+        priorExecutions: List<ToolExecutionEntity>,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>
+    ): PipelineInitOutcome {
+        val taskId = task.id
+        var planSteps = initialPlanSteps
+        if (isFirstRun) {
+            taskDao.updateStatus(taskId, TaskStatus.INITIALIZING)
+            logEvent(taskId, TimelineEventType.TASK_STARTED, "Session Initializing", "Ingesting objective: '${task.originalRequest}'")
+
+            taskDao.updateStatus(taskId, TaskStatus.PROVISIONING)
+            val health = ubuntuManager.getHealthReport()
+            logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Environment Provisioned", "Userspace: ${health.environmentName} • Storage: ${health.freeStorageMb}MB free")
+
+            taskDao.updateStatus(taskId, TaskStatus.PLANNING)
+
+            val criteria = verificationEngine.deriveGoalCriteria(task)
+            logEvent(
+                taskId,
+                TimelineEventType.PLANNING,
+                "Success Criteria Established (${criteria.size} Criteria)",
+                criteria.joinToString("\n") { "• [${it.targetType}] ${it.description}" }
+            )
+
+            val plan = generateHierarchicalPlan(task, resolver)
+            planStepDao.insertSteps(plan.map { PlanStepEntity.fromDomain(it) })
+            planSteps = plan
+
+            logEvent(
+                taskId,
+                TimelineEventType.PLANNING,
+                "Execution Plan Formulated (${plan.size} Phases)",
+                plan.joinToString("\n") { "${it.phase}: ${it.title} (${it.subtasks.size} subtasks)" }
+            )
+
+            if (task.mode == AgentMode.PLAN) {
+                taskDao.updateStatus(taskId, TaskStatus.AWAITING_PLAN_APPROVAL)
+                logEvent(taskId, TimelineEventType.WAITING, "Awaiting Plan Approval", "Plan ready for user review.")
+                return PipelineInitOutcome.Halted
+            }
+
+            taskDao.updateStatus(taskId, TaskStatus.READY)
+        } else {
+            val completedStepsCount = planSteps.count { it.status == StepStatus.COMPLETED }
+            logEvent(
+                taskId,
+                TimelineEventType.STATUS_CHANGE,
+                "Session Resumed",
+                "Resumed execution from iteration ${task.iteration}. Preserving ${planSteps.size} plan steps ($completedStepsCount completed)."
+            )
+        }
+
+        val existingTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+        val hasPreviousExecutions = priorExecutions.isNotEmpty() || task.iteration > 0
+        if (hasPreviousExecutions && existingTaskArtifacts.any { it.valid && it.existsOnDisk }) {
+            val initialVerification = verificationEngine.verifyTaskObjective(
+                task = task,
+                resolver = resolver,
+                registeredArtifacts = existingTaskArtifacts,
+                preExecutionBaseline = preExecutionBaseline
+            )
+            if (initialVerification.isVerified) {
+                logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Already Satisfied ✓", initialVerification.summary)
+                completeTask(task, initialVerification.summary, resolver, planSteps, initialVerification.status)
+                return PipelineInitOutcome.AlreadyCompleted
+            }
+        }
+
+        val coordPlan = coordinatorAgent.evaluateTaskDecomposition(task)
+        if (coordPlan.requiresParallelWorkers) {
+            logEvent(taskId, TimelineEventType.WORKER_STARTED, "Spawning Coordinator Workers", coordPlan.rationale)
+            coordinatorAgent.executeParallelSubtasks(task, coordPlan.subObjectives, resolver)
+            logEvent(taskId, TimelineEventType.WORKER_COMPLETED, "Worker Synthesis Completed", "Workers completed subtasks. Synthesis written to process/coordinated_synthesis.md")
+        }
+
+        return PipelineInitOutcome.Ready(task, planSteps)
+    }
+
+    private suspend fun reconcileZombieExecutions(taskId: String) {
+        val zombieStatuses = listOf(
+            ToolExecutionStatus.EXECUTING.name,
+            ToolExecutionStatus.RUNNING.name,
+            ToolExecutionStatus.DISPATCHED.name
+        )
+        for (statusName in zombieStatuses) {
+            val zombies = toolExecutionDao.getExecutionsForTaskByStatus(taskId, statusName)
+            for (zombie in zombies) {
+                toolExecutionDao.insertExecution(
+                    zombie.copy(
+                        status = ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name,
+                        exitCode = -1,
+                        errorType = "PROCESS_TERMINATED",
+                        errorMessage = "Host process died before tool result was observed (state was $statusName)",
+                        completedAt = System.currentTimeMillis()
+                    )
+                )
+                logEvent(
+                    taskId = taskId,
+                    type = TimelineEventType.STATUS_CHANGE,
+                    title = "Orphaned Execution Reconciled",
+                    details = "Tool invocation '${zombie.toolName}' (${zombie.callId}) was $statusName when host died. Transitioned to UNKNOWN_AFTER_PROCESS_DEATH (RESULT = NOT_OBSERVED).",
+                    toolCallId = zombie.callId
+                )
+            }
+        }
+    }
+
+    private suspend fun hydratePersistedExecutions(taskId: String): MutableList<Pair<String, ToolResult>> {
+        val persistedExecutions = toolExecutionDao.getRecentExecutionsChronological(taskId, 20)
+        val recentToolResults = mutableListOf<Pair<String, ToolResult>>()
+        for (pe in persistedExecutions) {
+            if (pe.status == ToolExecutionStatus.SUCCEEDED.name || 
+                pe.status == ToolExecutionStatus.FAILED.name || 
+                pe.status == ToolExecutionStatus.CANCELLED.name || 
+                pe.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name ||
+                (pe.errorType == "PROCESS_TERMINATED" && pe.exitCode == -1)) {
+                recentToolResults.add(Pair(pe.toolName, pe.toDomainResult()))
+            }
+        }
+        return recentToolResults
+    }
+
+    private suspend fun executePendingApprovedCall(
+        taskId: String,
+        currentIteration: Int,
+        resolver: WorkspacePathResolver,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>,
+        task: Task,
+        recentToolResults: MutableList<Pair<String, ToolResult>>
+    ) {
+        val pendingApproved = approvalManager.consumeApprovedRequestForTask(taskId) ?: return
+        if (pendingApproved.toolCallId.isNullOrBlank()) return
+        val callId = pendingApproved.toolCallId
+        val rawToolName = pendingApproved.toolName ?: "run_command"
+        val toolName = com.example.aragon.tools.ToolRegistry.resolveCanonicalToolName(rawToolName)
+        val argsJson = pendingApproved.argumentsJson ?: "{}"
+        val approvedToolCall = ToolCall(
+            callId = callId,
+            taskId = taskId,
+            toolName = toolName,
+            argumentsJson = argsJson,
+            iterationId = currentIteration,
+            status = ToolExecutionStatus.APPROVED
+        )
+
+        toolExecutionDao.insertExecution(
+            ToolExecutionEntity(
+                callId = callId,
+                taskId = taskId,
+                toolName = toolName,
+                argumentsJson = argsJson,
+                success = false,
+                exitCode = -1,
+                stdout = "",
+                stderr = "",
+                durationMs = 0L,
+                workingDirectory = resolver.workspaceDir.absolutePath,
+                errorType = null,
+                errorMessage = null,
+                requestedAt = approvedToolCall.requestedAt,
+                dispatchedAt = System.currentTimeMillis(),
+                startedAt = System.currentTimeMillis(),
+                completedAt = 0L,
+                status = ToolExecutionStatus.RUNNING.name,
+                artifacts = emptyList()
+            )
+        )
+
+        logEvent(
+            taskId = taskId,
+            type = TimelineEventType.TOOL_STARTED,
+            title = "Executing Approved Tool: $toolName",
+            details = "Executing approved action: ${pendingApproved.proposedAction}",
+            toolCallId = callId
+        )
+
+        val toolResult = try {
+            toolDispatcher.dispatch(
+                toolCall = approvedToolCall,
+                resolver = resolver,
+                autonomyLevel = preferencesManager.autonomyLevel.value,
+                isPreApproved = true
+            )
+        } catch (e: CancellationException) {
+            toolExecutionDao.insertExecution(
+                ToolExecutionEntity(
+                    callId = callId,
+                    taskId = taskId,
+                    toolName = toolName,
+                    argumentsJson = argsJson,
+                    success = false,
+                    exitCode = 130,
+                    stdout = "",
+                    stderr = "Execution cancelled",
+                    durationMs = 0L,
+                    workingDirectory = resolver.workspaceDir.absolutePath,
+                    errorType = "CANCELLED",
+                    errorMessage = "Execution cancelled",
+                    status = ToolExecutionStatus.CANCELLED.name
+                )
+            )
+            throw e
+        } catch (e: Exception) {
+            ToolResult(
+                callId = callId,
+                taskId = taskId,
+                success = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "Dispatch error: ${e.message}",
+                durationMs = 0L,
+                workingDirectory = resolver.workspaceDir.absolutePath,
+                errorType = "DISPATCH_EXCEPTION",
+                errorMessage = e.message ?: "Dispatch exception",
+                status = ToolExecutionStatus.FAILED
+            )
+        }
+
+        val verifiedArtifacts = toolResult.artifacts.filter { path ->
+            val f = resolver.resolve(path)
+            if (!f.exists() || !f.isFile || f.length() == 0L) return@filter false
+            val baseline = preExecutionBaseline[path]
+            val wasModified = baseline == null || f.lastModified() != baseline.lastModified || f.length() != baseline.size
+            wasModified && f.lastModified() >= (approvedToolCall.requestedAt - 2000L) && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
+        }
+
+        toolExecutionDao.insertExecution(
+            ToolExecutionEntity(
+                callId = callId,
+                taskId = taskId,
+                toolName = toolName,
+                argumentsJson = argsJson,
+                success = toolResult.success,
+                exitCode = toolResult.exitCode,
+                stdout = toolResult.stdout.take(50000),
+                stderr = toolResult.stderr.take(50000),
+                durationMs = toolResult.durationMs,
+                workingDirectory = toolResult.workingDirectory,
+                errorType = toolResult.errorType,
+                errorMessage = toolResult.errorMessage,
+                requestedAt = approvedToolCall.requestedAt,
+                dispatchedAt = toolResult.startedAt,
+                startedAt = toolResult.startedAt,
+                completedAt = toolResult.completedAt,
+                status = toolResult.status.name,
+                artifacts = verifiedArtifacts
+            )
+        )
+
+        contextManager.storeObservation(resolver, callId, toolResult.stdout, toolResult.stderr)
+        recentToolResults.add(Pair(toolName, toolResult.copy(artifacts = verifiedArtifacts)))
+
+        for (createdPath in verifiedArtifacts) {
+            artifactManager.registerArtifactFromTool(taskId, createdPath, callId, resolver)
+        }
+        artifactManager.discoverArtifacts(
+            taskId = taskId,
+            resolver = resolver,
+            activeToolInvocationId = callId,
+            executionStartTime = approvedToolCall.requestedAt,
+            preExecutionBaseline = preExecutionBaseline
+        )
+
+        val completionSummary = if (toolResult.success) {
+            "Exit code: 0 • Duration: ${toolResult.durationMs}ms"
+        } else {
+            "Exit code: ${toolResult.exitCode} • ${toolResult.errorMessage ?: toolResult.stderr.take(150)}"
+        }
+        logEvent(
+            taskId = taskId,
+            type = TimelineEventType.TOOL_COMPLETED,
+            title = "Tool Completed: $toolName (${if (toolResult.success) "Success" else "Exit ${toolResult.exitCode}"})",
+            details = completionSummary,
+            toolCallId = callId,
+            durationMs = toolResult.durationMs,
+            isSuccess = toolResult.success
+        )
+
+        val obsDetails = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800)
+        logEvent(
+            taskId = taskId,
+            type = TimelineEventType.OBSERVATION,
+            title = "Observation: $toolName",
+            details = obsDetails,
+            toolCallId = callId,
+            durationMs = toolResult.durationMs,
+            isSuccess = toolResult.success
+        )
+
+        advancePlanStepProgress(taskId, toolName, argsJson, toolResult, resolver, task)
+    }
+
+    private suspend fun handleDeterministicStepBranch(
+        task: Task,
+        planSteps: List<PlanStep>,
+        resolver: WorkspacePathResolver,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>,
+        currentIteration: Int
+    ): DeterministicStepOutcome {
+        val taskId = task.id
+        executeDeterministicStep(task, planSteps, resolver, currentIteration)
+        artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
+
+        val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+        val verification = verificationEngine.verifyTaskObjective(
+            task = task,
+            resolver = resolver,
+            registeredArtifacts = currentTaskArtifacts,
+            preExecutionBaseline = preExecutionBaseline
+        )
+        if (verification.isVerified) {
+            logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", verification.summary)
+            val completedTask = completeTask(task, verification.summary, resolver, planSteps, verification.status)
+            return DeterministicStepOutcome.GoalCompleted(completedTask)
+        } else if (currentIteration >= 2) {
+            taskDao.updateTask(
+                TaskEntity.fromDomain(
+                    task.copy(
+                        status = TaskStatus.FAILED,
+                        lastError = "Deterministic execution could not satisfy objective: ${verification.summary}"
+                    )
+                )
+            )
+            logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", verification.summary)
+            return DeterministicStepOutcome.FailedAndHalted
+        }
+        return DeterministicStepOutcome.ContinueToNextIteration
+    }
+
+    private suspend fun executeSingleToolCall(
+        taskId: String,
+        callId: String,
+        canonicalToolName: String,
+        argumentsJson: String,
+        toolCall: ToolCall,
+        resolver: WorkspacePathResolver,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>
+    ): ToolExecutionSingleResult {
+        val preExecution = ToolExecutionEntity(
+            callId = callId,
+            taskId = taskId,
+            toolName = canonicalToolName,
+            argumentsJson = argumentsJson,
+            success = false,
+            exitCode = -1,
+            stdout = "",
+            stderr = "",
+            durationMs = 0L,
+            workingDirectory = resolver.workspaceDir.absolutePath,
+            errorType = null,
+            errorMessage = null,
+            requestedAt = toolCall.requestedAt,
+            dispatchedAt = System.currentTimeMillis(),
+            startedAt = System.currentTimeMillis(),
+            completedAt = 0L,
+            status = ToolExecutionStatus.DISPATCHED.name,
+            artifacts = emptyList()
+        )
+        toolExecutionDao.insertExecution(preExecution)
+
+        logEvent(
+            taskId = taskId,
+            type = TimelineEventType.TOOL_DISPATCHED,
+            title = "Tool Dispatched: $canonicalToolName",
+            details = "Validating parameters and dispatching to execution substrate",
+            toolCallId = callId
+        )
+
+        var currentAttempt = 0
+        val maxTransientRetries = 2
+        var toolResult: ToolResult
+
+        try {
+            while (true) {
+                toolResult = toolDispatcher.dispatch(
+                    toolCall = toolCall,
+                    resolver = resolver,
+                    autonomyLevel = preferencesManager.autonomyLevel.value,
+                    onStatusChange = { status ->
+                        if (status == com.example.aragon.domain.model.ToolExecutionStatus.RUNNING ||
+                            status == com.example.aragon.domain.model.ToolExecutionStatus.EXECUTING) {
+                            sessionScope.launch {
+                                toolExecutionDao.insertExecution(
+                                    preExecution.copy(
+                                        status = status.name,
+                                        startedAt = System.currentTimeMillis()
+                                    )
+                                )
+                                logEvent(
+                                    taskId = taskId,
+                                    type = TimelineEventType.TOOL_STARTED,
+                                    title = "Tool ${if (status == ToolExecutionStatus.EXECUTING) "Executing" else "Running"}: $canonicalToolName${if (currentAttempt > 0) " (Retry #$currentAttempt)" else ""}",
+                                    details = "Process started in environment",
+                                    toolCallId = callId
+                                )
+                            }
+                        }
+                    }
+                )
+
+                if (toolResult.success || currentAttempt >= maxTransientRetries) {
+                    break
+                }
+
+                if (toolResult.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
+                    toolResult.terminationReason == "PROCESS_DIED_BEFORE_RESULT") {
+                    break
+                }
+
+                val semantics = ToolDispatcher.classifyOperation(canonicalToolName, argumentsJson)
+                val isRetrySafe = semantics == OperationSemantics.READ_ONLY || semantics == OperationSemantics.IDEMPOTENT_MUTATION
+                if (!isRetrySafe) {
+                    break
+                }
+
+                val isTransient = toolResult.timedOut ||
+                    (toolResult.errorMessage.orEmpty() + " " + toolResult.stderr).let { err ->
+                        val lower = err.lowercase()
+                        lower.contains("timeout") || lower.contains("timed out") ||
+                        lower.contains("429") || lower.contains("rate limit") ||
+                        lower.contains("busy") || lower.contains("eagain") ||
+                        lower.contains("connection reset") || lower.contains("socket closed")
+                    }
+
+                if (!isTransient) {
+                    break
+                }
+
+                currentAttempt++
+                val backoffDelayMs = (400L * (1L shl currentAttempt)) + (50..200).random()
+                logEvent(
+                    taskId = taskId,
+                    type = TimelineEventType.REPLAN,
+                    title = "Transient Failure: $canonicalToolName",
+                    details = "Encountered transient error (${toolResult.errorType ?: "TIMEOUT/BUSY"}). Applying exponential backoff (${backoffDelayMs}ms) before retry $currentAttempt of $maxTransientRetries...",
+                    toolCallId = callId
+                )
+                delay(backoffDelayMs)
+            }
+        } catch (e: CancellationException) {
+            toolExecutionDao.insertExecution(
+                preExecution.copy(
+                    status = ToolExecutionStatus.CANCELLED.name,
+                    completedAt = System.currentTimeMillis(),
+                    errorType = "CANCELLED",
+                    errorMessage = "Tool execution cancelled"
+                )
+            )
+            throw e
+        } catch (e: Exception) {
+            toolResult = ToolResult(
+                callId = callId,
+                taskId = taskId,
+                success = false,
+                exitCode = 1,
+                stdout = "",
+                stderr = "Dispatch error: ${e.message}",
+                durationMs = System.currentTimeMillis() - preExecution.dispatchedAt,
+                workingDirectory = resolver.workspaceDir.absolutePath,
+                errorType = "DISPATCH_EXCEPTION",
+                errorMessage = e.message ?: "Unknown dispatch exception",
+                status = ToolExecutionStatus.FAILED
+            )
+        }
+
+        if (toolResult.status == ToolExecutionStatus.AWAITING_APPROVAL || (toolResult.cancelled && toolResult.terminationReason == "AWAITING_APPROVAL")) {
+            toolExecutionDao.insertExecution(
+                ToolExecutionEntity(
+                    callId = callId,
+                    taskId = taskId,
+                    toolName = canonicalToolName,
+                    argumentsJson = argumentsJson,
+                    success = false,
+                    exitCode = 126,
+                    stdout = "",
+                    stderr = toolResult.stderr,
+                    durationMs = 0L,
+                    workingDirectory = toolResult.workingDirectory,
+                    errorType = "AWAITING_APPROVAL",
+                    errorMessage = toolResult.stderr,
+                    requestedAt = toolCall.requestedAt,
+                    dispatchedAt = toolResult.startedAt,
+                    startedAt = toolResult.startedAt,
+                    completedAt = toolResult.completedAt,
+                    status = ToolExecutionStatus.AWAITING_APPROVAL.name
+                )
+            )
+            taskDao.updateStatus(taskId, TaskStatus.AWAITING_APPROVAL)
+            logEvent(taskId, TimelineEventType.APPROVAL_REQUESTED, "Approval Required", "Operation paused awaiting user confirmation.")
+            return ToolExecutionSingleResult.AwaitingApproval
+        }
+
+        val verifiedArtifacts = toolResult.artifacts.filter { path ->
+            val f = resolver.resolve(path)
+            if (!f.exists() || !f.isFile || f.length() == 0L) return@filter false
+            val baseline = preExecutionBaseline[path]
+            val wasModified = baseline == null || f.lastModified() != baseline.lastModified || f.length() != baseline.size
+            wasModified && f.lastModified() >= (toolCall.requestedAt - 2000L) && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
+        }
+
+        toolExecutionDao.insertExecution(
+            ToolExecutionEntity(
+                callId = callId,
+                taskId = taskId,
+                toolName = canonicalToolName,
+                argumentsJson = argumentsJson,
+                success = toolResult.success,
+                exitCode = toolResult.exitCode,
+                stdout = toolResult.stdout.take(50000),
+                stderr = toolResult.stderr.take(50000),
+                durationMs = toolResult.durationMs,
+                workingDirectory = toolResult.workingDirectory,
+                errorType = toolResult.errorType,
+                errorMessage = toolResult.errorMessage,
+                requestedAt = toolCall.requestedAt,
+                dispatchedAt = toolResult.startedAt,
+                startedAt = toolResult.startedAt,
+                completedAt = toolResult.completedAt,
+                status = toolResult.status.name,
+                artifacts = verifiedArtifacts
+            )
+        )
+
+        contextManager.storeObservation(resolver, callId, toolResult.stdout, toolResult.stderr)
+
+        for (createdPath in verifiedArtifacts) {
+            artifactManager.registerArtifactFromTool(taskId, createdPath, callId, resolver)
+        }
+        artifactManager.discoverArtifacts(
+            taskId = taskId,
+            resolver = resolver,
+            activeToolInvocationId = callId,
+            executionStartTime = toolCall.requestedAt,
+            preExecutionBaseline = preExecutionBaseline
+        )
+
+        val completionSummary = if (toolResult.success) {
+            "Exit code: 0 • Duration: ${toolResult.durationMs}ms"
+        } else {
+            "Exit code: ${toolResult.exitCode} • ${toolResult.errorMessage ?: toolResult.stderr.take(150)}"
+        }
+        logEvent(
+            taskId = taskId,
+            type = TimelineEventType.TOOL_COMPLETED,
+            title = "Tool Completed: $canonicalToolName (${if (toolResult.success) "Success" else "Exit ${toolResult.exitCode}"})",
+            details = completionSummary,
+            toolCallId = callId,
+            durationMs = toolResult.durationMs,
+            isSuccess = toolResult.success
+        )
+
+        val obsDetails = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800)
+        logEvent(
+            taskId = taskId,
+            type = TimelineEventType.OBSERVATION,
+            title = "Observation: $canonicalToolName",
+            details = obsDetails,
+            toolCallId = callId,
+            durationMs = toolResult.durationMs,
+            isSuccess = toolResult.success
+        )
+
+        return ToolExecutionSingleResult.Success(toolResult, verifiedArtifacts)
+    }
+
+    private suspend fun executeIterationTools(
+        taskId: String,
+        allToolCalls: List<com.example.aragon.llm.LlmToolCall>,
+        resolver: WorkspacePathResolver,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>,
+        currentIteration: Int,
+        recentToolResults: MutableList<Pair<String, ToolResult>>,
+        loopDetector: LoopDetector,
+        initialTask: Task,
+        planSteps: List<PlanStep>,
+        responseContent: String
+    ): IterationToolsOutcome {
+        taskDao.updateStatus(taskId, TaskStatus.OBSERVING)
+        val callOccurrenceMap = mutableMapOf<String, Int>()
+        val seenCallIdsInResponse = mutableSetOf<String>()
+        var task = initialTask
+        var loopWarning: String? = null
+
+        for (tc in allToolCalls) {
+            val rawId = tc.id.trim()
+            val isGeneric = rawId.isBlank() || com.example.aragon.llm.ToolCallParser.isSyntheticOrGenericId(rawId)
+            val normArgs = tc.argumentsJson.trim()
+            val argsHash = java.security.MessageDigest.getInstance("MD5")
+                .digest(normArgs.toByteArray(Charsets.UTF_8))
+                .take(4).joinToString("") { "%02x".format(it) }
+            val canonicalToolName = com.example.aragon.tools.ToolRegistry.resolveCanonicalToolName(tc.name)
+            val occurrenceKey = "${canonicalToolName}_${argsHash}"
+            val occurrence = callOccurrenceMap.getOrDefault(occurrenceKey, 0)
+            callOccurrenceMap[occurrenceKey] = occurrence + 1
+
+            val callId = if (isGeneric) {
+                "call_${taskId}_it${currentIteration}_${canonicalToolName}_${argsHash}_$occurrence"
+            } else if (seenCallIdsInResponse.contains(rawId)) {
+                "${rawId}_occ$occurrence"
+            } else {
+                val existingExec = toolExecutionDao.getExecutionByCallId(rawId)
+                if (existingExec == null) {
+                    rawId
+                } else if (existingExec.taskId != taskId) {
+                    "call_${taskId}_it${currentIteration}_${canonicalToolName}_${argsHash}_$occurrence"
+                } else {
+                    "${rawId}_it${currentIteration}_occ$occurrence"
+                }
+            }
+            seenCallIdsInResponse.add(callId)
+
+            val toolCall = ToolCall(
+                callId = callId,
+                taskId = taskId,
+                toolName = canonicalToolName,
+                argumentsJson = tc.argumentsJson,
+                iterationId = currentIteration,
+                status = ToolExecutionStatus.CREATED
+            )
+
+            // Prevent duplicate execution if this call was already executed and completed in THIS iteration
+            val priorExecution = toolExecutionDao.getExecutionByCallId(callId)
+            val isReadOnly = ToolDispatcher.isReadOnly(canonicalToolName, tc.argumentsJson)
+            if (!isReadOnly && priorExecution != null && priorExecution.taskId == taskId && priorExecution.toolName == canonicalToolName &&
+                areArgumentsEqual(priorExecution.argumentsJson, tc.argumentsJson) &&
+                (priorExecution.status == ToolExecutionStatus.SUCCEEDED.name || 
+                 priorExecution.status == ToolExecutionStatus.FAILED.name || 
+                 priorExecution.status == ToolExecutionStatus.CANCELLED.name ||
+                 priorExecution.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name)) {
+                recentToolResults.add(Pair(canonicalToolName, priorExecution.toDomainResult()))
+                logEvent(
+                    taskId = taskId,
+                    type = TimelineEventType.OBSERVATION,
+                    title = "Reused Prior Execution: $canonicalToolName",
+                    details = "Tool call $callId was already completed (${priorExecution.status}). Reusing previous observation.",
+                    toolCallId = callId
+                )
+                continue
+            }
+
+            logEvent(
+                taskId = taskId,
+                type = TimelineEventType.TOOL_REQUESTED,
+                title = "Tool Requested: $canonicalToolName",
+                details = tc.argumentsJson,
+                toolCallId = callId
+            )
+
+            val preDispatchLoop = loopDetector.checkPreDispatch(canonicalToolName, tc.argumentsJson)
+            if (preDispatchLoop != null) {
+                val blockedEntity = ToolExecutionEntity(
+                    callId = callId,
+                    taskId = taskId,
+                    toolName = canonicalToolName,
+                    argumentsJson = tc.argumentsJson,
+                    success = false,
+                    exitCode = 1,
+                    stdout = "",
+                    stderr = preDispatchLoop.reason,
+                    durationMs = 0L,
+                    workingDirectory = resolver.workspaceDir.absolutePath,
+                    errorType = "UNKNOWN_RETRY_BLOCKED",
+                    errorMessage = preDispatchLoop.reason,
+                    requestedAt = toolCall.requestedAt,
+                    dispatchedAt = System.currentTimeMillis(),
+                    startedAt = System.currentTimeMillis(),
+                    completedAt = System.currentTimeMillis(),
+                    status = ToolExecutionStatus.FAILED.name,
+                    artifacts = emptyList()
+                )
+                toolExecutionDao.insertExecution(blockedEntity)
+                contextManager.storeObservation(resolver, callId, "", preDispatchLoop.reason)
+                recentToolResults.add(Pair(canonicalToolName, blockedEntity.toDomainResult()))
+                logEvent(
+                    taskId = taskId,
+                    type = TimelineEventType.ERROR,
+                    title = "Blind Mutation Blocked After UNKNOWN",
+                    details = preDispatchLoop.reason,
+                    toolCallId = callId
+                )
+                break
+            }
+
+            val singleResult = executeSingleToolCall(
+                taskId = taskId,
+                callId = callId,
+                canonicalToolName = canonicalToolName,
+                argumentsJson = tc.argumentsJson,
+                toolCall = toolCall,
+                resolver = resolver,
+                preExecutionBaseline = preExecutionBaseline
+            )
+
+            when (singleResult) {
+                is ToolExecutionSingleResult.AwaitingApproval -> {
+                    return IterationToolsOutcome.AwaitingApproval
+                }
+                is ToolExecutionSingleResult.Success -> {
+                    val toolResult = singleResult.toolResult
+                    val verifiedArtifacts = singleResult.verifiedArtifacts
+                    recentToolResults.add(Pair(canonicalToolName, toolResult.copy(artifacts = verifiedArtifacts)))
+
+                    val currentMetrics = task.metrics
+                    task = task.copy(
+                        metrics = currentMetrics.copy(
+                            toolCallsCount = currentMetrics.toolCallsCount + 1,
+                            successfulToolCalls = if (toolResult.success) currentMetrics.successfulToolCalls + 1 else currentMetrics.successfulToolCalls,
+                            failedToolCalls = if (!toolResult.success) currentMetrics.failedToolCalls + 1 else currentMetrics.failedToolCalls,
+                            commandsExecuted = if (canonicalToolName == "run_command") currentMetrics.commandsExecuted + 1 else currentMetrics.commandsExecuted
+                        )
+                    )
+
+                    advancePlanStepProgress(taskId, canonicalToolName, tc.argumentsJson, toolResult.copy(artifacts = verifiedArtifacts), resolver, task)
+
+                    if (canonicalToolName == "complete_task") {
+                        val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                        val postToolVerification = verificationEngine.verifyTaskObjective(
+                            task = task,
+                            resolver = resolver,
+                            registeredArtifacts = currentTaskArtifacts,
+                            preExecutionBaseline = preExecutionBaseline,
+                            recentToolResults = recentToolResults,
+                            llmResponseContent = toolResult.stdout
+                        )
+                        if (postToolVerification.isVerified) {
+                            val goalSummary = runCatching { org.json.JSONObject(tc.argumentsJson).optString("summary", postToolVerification.summary) }.getOrDefault(postToolVerification.summary)
+                            logEvent(
+                                taskId,
+                                TimelineEventType.GOAL_COMPLETED,
+                                "Goal Achieved ✓",
+                                goalSummary
+                            )
+                            val completedTask = completeTask(task, goalSummary, resolver, planSteps, postToolVerification.status)
+                            return IterationToolsOutcome.GoalCompleted(completedTask)
+                        } else {
+                            logEvent(
+                                taskId,
+                                TimelineEventType.ERROR,
+                                "Completion Rejected: Unmet Criteria",
+                                "The agent called complete_task, but objective verification failed: ${postToolVerification.summary}."
+                            )
+                        }
+                    }
+
+                    if (toolResult.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
+                        toolResult.terminationReason == "PROCESS_DIED_BEFORE_RESULT") {
+                        logEvent(
+                            taskId = taskId,
+                            type = TimelineEventType.ERROR,
+                            title = "Host Process Died: UNKNOWN Outcome",
+                            details = "Halting remaining tool invocations in this batch. Forcing state reconciliation.",
+                            toolCallId = callId
+                        )
+                        break
+                    }
+
+                    val loopAnalysis = loopDetector.record(tc.name, tc.argumentsJson, toolResult)
+                    if (loopAnalysis.isLooping) {
+                        loopWarning = loopAnalysis.reason
+                        contextManager.recordFailedApproach(taskId, tc.name, loopAnalysis.reason, tc.argumentsJson)
+                        logEvent(taskId, TimelineEventType.ERROR, "Loop Detected (${loopAnalysis.loopType})", loopAnalysis.reason)
+
+                        if (loopAnalysis.shouldTerminateBlocked) {
+                            safeUpdateTask(
+                                TaskEntity.fromDomain(
+                                    task.copy(
+                                        status = TaskStatus.BLOCKED,
+                                        lastError = loopAnalysis.reason
+                                    )
+                                )
+                            )
+                            logEvent(
+                                taskId,
+                                TimelineEventType.STATUS_CHANGE,
+                                "Execution Blocked (Stagnation)",
+                                "Halted execution safely: ${loopAnalysis.reason}"
+                            )
+                            activeSessions.remove(taskId)
+                            return IterationToolsOutcome.SessionTerminated
+                        }
+
+                        safeUpdateStatus(taskId, TaskStatus.REPLANNING)
+                        val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+                        val currentVerification = verificationEngine.verifyTaskObjective(
+                            task = task,
+                            resolver = resolver,
+                            registeredArtifacts = currentTaskArtifacts,
+                            preExecutionBaseline = preExecutionBaseline,
+                            recentToolResults = recentToolResults
+                        )
+                        val currentDiscovered = artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
+                        val decision = replanner.analyzeAndReplan(
+                            task, planSteps, contextManager.getFailedApproaches(taskId),
+                            recentToolResults, currentDiscovered, currentVerification, resolver
+                        )
+
+                        if (decision.type == ReplanDecisionType.COMPLETE) {
+                            val completedTask = completeTask(task, decision.explanation, resolver, planSteps, currentVerification.status)
+                            return IterationToolsOutcome.GoalCompleted(completedTask)
+                        } else if (decision.type == ReplanDecisionType.ABORT) {
+                            safeUpdateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.BLOCKED, lastError = decision.explanation)))
+                            logEvent(taskId, TimelineEventType.ERROR, "Strategies Exhausted", decision.explanation)
+                            activeSessions.remove(taskId)
+                            return IterationToolsOutcome.SessionTerminated
+                        }
+
+                        logEvent(taskId, TimelineEventType.REPLAN, "Replanner Activated", decision.explanation)
+                    } else {
+                        loopWarning = null
+                    }
+                }
+            }
+        }
+
+        val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+        val postTurnVerification = verificationEngine.verifyTaskObjective(
+            task = task,
+            resolver = resolver,
+            registeredArtifacts = currentTaskArtifacts,
+            preExecutionBaseline = preExecutionBaseline,
+            recentToolResults = recentToolResults,
+            llmResponseContent = responseContent
+        )
+        if (postTurnVerification.isVerified && responseContent.isNotBlank() && !com.example.aragon.llm.ToolCallParser.isGenericPreamble(responseContent)) {
+            val finalSummary = responseContent.ifBlank { postTurnVerification.summary }
+            logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", finalSummary)
+            val completedTask = completeTask(task, finalSummary, resolver, planSteps, postTurnVerification.status)
+            return IterationToolsOutcome.GoalCompleted(completedTask)
+        }
+
+        return IterationToolsOutcome.Done(task, loopWarning, shouldBreak = false)
+    }
+
+    private suspend fun handleTextResponseWithoutTools(
+        taskId: String,
+        response: com.example.aragon.llm.LlmResponse,
+        resolver: WorkspacePathResolver,
+        preExecutionBaseline: Map<String, com.example.aragon.artifacts.FileSnapshot>,
+        currentIteration: Int,
+        maxIterations: Int,
+        recentToolResults: List<Pair<String, ToolResult>>,
+        task: Task,
+        planSteps: List<PlanStep>
+    ): TextResponseOutcome {
+        logEvent(taskId, TimelineEventType.RESULT, "Model Response", response.content)
+
+        var unverifiedClaimFeedback: String? = null
+        val isClaimingWithoutExecution = com.example.aragon.llm.ToolCallParser.isClaimingExecutionWithoutToolCall(response.content)
+        if (isClaimingWithoutExecution) {
+            val claimWarning = "Model described actions or claimed completion in conversational text without invoking a structured tool. No actions executed."
+            logEvent(
+                taskId,
+                TimelineEventType.ERROR,
+                "Unverified Prose Claim",
+                claimWarning
+            )
+            contextManager.recordFailedApproach(
+                taskId = taskId,
+                strategy = "conversational_claim_without_tool",
+                error = claimWarning,
+                context = response.content.take(200)
+            )
+            unverifiedClaimFeedback = "In the previous turn, you described actions or claimed completion in conversational text without invoking a structured tool. No actions were executed and no files were created. Do not output conversational apologies or explanations. Immediately invoke a structured tool (e.g. document_create, file_write, run_command) using the tool call format to perform the action."
+        }
+
+        safeUpdateStatus(taskId, TaskStatus.VERIFYING)
+        val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
+        val verification = verificationEngine.verifyTaskObjective(
+            task = task,
+            resolver = resolver,
+            registeredArtifacts = currentTaskArtifacts,
+            preExecutionBaseline = preExecutionBaseline,
+            recentToolResults = recentToolResults,
+            llmResponseContent = response.content
+        )
+
+        if (verification.isVerified) {
+            logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { verification.summary })
+            val completedTask = completeTask(task, response.content.ifBlank { verification.summary }, resolver, planSteps, verification.status)
+            return TextResponseOutcome.GoalCompleted(completedTask)
+        } else {
+            logEvent(
+                taskId,
+                TimelineEventType.REASONING,
+                "Objective Verification Unmet",
+                "Objective criteria unmet (${verification.summary}). You must call structured tools (e.g. document_create, file_write, run_command) to satisfy requirements."
+            )
+            if (currentIteration >= maxIterations - 1) {
+                safeUpdateTask(
+                    TaskEntity.fromDomain(
+                        task.copy(
+                            status = TaskStatus.FAILED,
+                            lastError = "Objective criteria unmet: ${verification.summary}"
+                        )
+                    )
+                )
+                logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", verification.summary)
+                logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", "Required criteria were not satisfied: ${verification.summary}")
+                return TextResponseOutcome.FailedAndHalted
+            }
+        }
+        return TextResponseOutcome.ContinueToNext(unverifiedClaimFeedback)
+    }
+
     private suspend fun runPipeline(taskId: String) {
         val loopDetector = loopDetectors.getOrPut(taskId) { LoopDetector() }
         loopDetector.reset()
@@ -381,10 +1319,8 @@ class SessionOrchestrator(
         var planSteps = planStepDao.getStepsForTask(taskId).map { it.toDomain() }
         val priorExecutions = toolExecutionDao.getRecentExecutions(taskId, 1)
 
-        // Genuinely new task if and only if no persisted plan steps, no prior tool executions, and iteration == 0
         val isFirstRun = planSteps.isEmpty() && priorExecutions.isEmpty() && task.iteration == 0
 
-        // Snapshot workspace state at start of execution to distinguish pre-existing files from fresh task deliverables
         val preExecutionBaseline = if (isFirstRun) {
             val baseline = artifactManager.snapshotWorkspace(resolver)
             artifactManager.saveInitialBaseline(resolver, baseline)
@@ -398,135 +1334,22 @@ class SessionOrchestrator(
         }
 
         try {
-            if (isFirstRun) {
-                // ==========================================
-                // PHASE 1: INGESTION & PROVISIONING (FIRST RUN ONLY)
-                // ==========================================
-                taskDao.updateStatus(taskId, TaskStatus.INITIALIZING)
-                logEvent(taskId, TimelineEventType.TASK_STARTED, "Session Initializing", "Ingesting objective: '${task.originalRequest}'")
-
-                taskDao.updateStatus(taskId, TaskStatus.PROVISIONING)
-                val health = ubuntuManager.getHealthReport()
-                logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Environment Provisioned", "Userspace: ${health.environmentName} • Storage: ${health.freeStorageMb}MB free")
-
-                // ==========================================
-                // PHASE 2: HIERARCHICAL PLANNING & GOAL CRITERIA
-                // ==========================================
-                taskDao.updateStatus(taskId, TaskStatus.PLANNING)
-
-                // Derive explicit measurable success criteria
-                val criteria = verificationEngine.deriveGoalCriteria(task)
-                logEvent(
-                    taskId,
-                    TimelineEventType.PLANNING,
-                    "Success Criteria Established (${criteria.size} Criteria)",
-                    criteria.joinToString("\n") { "• [${it.targetType}] ${it.description}" }
-                )
-
-                val plan = generateHierarchicalPlan(task, resolver)
-                planStepDao.insertSteps(plan.map { PlanStepEntity.fromDomain(it) })
-                planSteps = plan
-
-                logEvent(
-                    taskId,
-                    TimelineEventType.PLANNING,
-                    "Execution Plan Formulated (${plan.size} Phases)",
-                    plan.joinToString("\n") { "${it.phase}: ${it.title} (${it.subtasks.size} subtasks)" }
-                )
-
-                // Plan approval gate
-                if (task.mode == AgentMode.PLAN) {
-                    taskDao.updateStatus(taskId, TaskStatus.AWAITING_PLAN_APPROVAL)
-                    logEvent(taskId, TimelineEventType.WAITING, "Awaiting Plan Approval", "Plan ready for user review.")
-                    return
-                }
-
-                taskDao.updateStatus(taskId, TaskStatus.READY)
-            } else {
-                // Recovery / Resume Path:
-                // Existing plan steps and execution history are preserved without re-generating or deleting plan steps.
-                val completedStepsCount = planSteps.count { it.status == StepStatus.COMPLETED }
-                logEvent(
-                    taskId,
-                    TimelineEventType.STATUS_CHANGE,
-                    "Session Resumed",
-                    "Resumed execution from iteration ${task.iteration}. Preserving ${planSteps.size} plan steps ($completedStepsCount completed)."
-                )
-            }
-
-            // PRE-EXECUTION CHECK: Only allowed if task is resuming with verified artifacts created by this task
-            val existingTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
-            val hasPreviousExecutions = priorExecutions.isNotEmpty() || task.iteration > 0
-            if (hasPreviousExecutions && existingTaskArtifacts.any { it.valid && it.existsOnDisk }) {
-                val initialVerification = verificationEngine.verifyTaskObjective(
-                    task = task,
-                    resolver = resolver,
-                    registeredArtifacts = existingTaskArtifacts,
-                    preExecutionBaseline = preExecutionBaseline
-                )
-                if (initialVerification.isVerified) {
-                    logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Already Satisfied ✓", initialVerification.summary)
-                    task = completeTask(task, initialVerification.summary, resolver, planSteps, initialVerification.status)
+            when (val initOutcome = initializePipelineSession(task, resolver, isFirstRun, planSteps, priorExecutions, preExecutionBaseline)) {
+                is PipelineInitOutcome.Halted -> return
+                is PipelineInitOutcome.AlreadyCompleted -> {
                     activeSessions.remove(taskId)
                     return
                 }
+                is PipelineInitOutcome.Ready -> {
+                    task = initOutcome.task
+                    planSteps = initOutcome.planSteps
+                }
             }
 
-            // Check if task qualifies for Coordinator + Parallel Workers
-            val coordPlan = coordinatorAgent.evaluateTaskDecomposition(task)
-            if (coordPlan.requiresParallelWorkers) {
-                logEvent(taskId, TimelineEventType.WORKER_STARTED, "Spawning Coordinator Workers", coordPlan.rationale)
-                val coordResult = coordinatorAgent.executeParallelSubtasks(task, coordPlan.subObjectives, resolver)
-                logEvent(taskId, TimelineEventType.WORKER_COMPLETED, "Worker Synthesis Completed", "Workers completed subtasks. Synthesis written to process/coordinated_synthesis.md")
-            }
-
-            // ==========================================
-            // PHASE 3: REACT EXECUTION LOOP WITH GOAL GUARANTEE
-            // ==========================================
             taskDao.updateStatus(taskId, TaskStatus.EXECUTING)
-            
-            // Reconcile any orphaned in-flight executions left over from an unexpected process death
-            val zombieStatuses = listOf(
-                ToolExecutionStatus.EXECUTING.name,
-                ToolExecutionStatus.RUNNING.name,
-                ToolExecutionStatus.DISPATCHED.name
-            )
-            for (statusName in zombieStatuses) {
-                val zombies = toolExecutionDao.getExecutionsForTaskByStatus(taskId, statusName)
-                for (zombie in zombies) {
-                    toolExecutionDao.insertExecution(
-                        zombie.copy(
-                            status = ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name,
-                            exitCode = -1,
-                            errorType = "PROCESS_TERMINATED",
-                            errorMessage = "Host process died before tool result was observed (state was $statusName)",
-                            completedAt = System.currentTimeMillis()
-                        )
-                    )
-                    logEvent(
-                        taskId = taskId,
-                        type = TimelineEventType.STATUS_CHANGE,
-                        title = "Orphaned Execution Reconciled",
-                        details = "Tool invocation '${zombie.toolName}' (${zombie.callId}) was $statusName when host died. Transitioned to UNKNOWN_AFTER_PROCESS_DEATH (RESULT = NOT_OBSERVED).",
-                        toolCallId = zombie.callId
-                    )
-                }
-            }
+            reconcileZombieExecutions(taskId)
 
-            // Hydrate previous tool executions from Room in strict chronological order
-            val persistedExecutions = toolExecutionDao.getRecentExecutionsChronological(taskId, 20)
-            val recentToolResults = mutableListOf<Pair<String, ToolResult>>()
-            for (pe in persistedExecutions) {
-                if (pe.status == ToolExecutionStatus.SUCCEEDED.name || 
-                    pe.status == ToolExecutionStatus.FAILED.name || 
-                    pe.status == ToolExecutionStatus.CANCELLED.name ||
-                    pe.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name ||
-                    (pe.errorType == "PROCESS_TERMINATED" && pe.exitCode == -1)) {
-                    recentToolResults.add(Pair(pe.toolName, pe.toDomainResult()))
-                }
-            }
-
-            // Reconcile disk deliverables into Room artifacts table immediately upon starting or resuming Phase 3
+            val recentToolResults = hydratePersistedExecutions(taskId)
             artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
 
             var loopWarning: String? = null
@@ -535,165 +1358,7 @@ class SessionOrchestrator(
             val maxIterations = preferencesManager.maxIterations.value
             var metrics = task.metrics
 
-            // If an approved tool call is pending for this task, execute it immediately without asking user again
-            val pendingApproved = approvalManager.consumeApprovedRequestForTask(taskId)
-            if (pendingApproved != null && !pendingApproved.toolCallId.isNullOrBlank()) {
-                val callId = pendingApproved.toolCallId
-                val rawToolName = pendingApproved.toolName ?: "run_command"
-                val toolName = com.example.aragon.tools.ToolRegistry.resolveCanonicalToolName(rawToolName)
-                val argsJson = pendingApproved.argumentsJson ?: "{}"
-                val approvedToolCall = ToolCall(
-                    callId = callId,
-                    taskId = taskId,
-                    toolName = toolName,
-                    argumentsJson = argsJson,
-                    iterationId = currentIteration,
-                    status = ToolExecutionStatus.APPROVED
-                )
-
-                // Pre-dispatch persistent ledger entry
-                toolExecutionDao.insertExecution(
-                    ToolExecutionEntity(
-                        callId = callId,
-                        taskId = taskId,
-                        toolName = toolName,
-                        argumentsJson = argsJson,
-                        success = false,
-                        exitCode = -1,
-                        stdout = "",
-                        stderr = "",
-                        durationMs = 0L,
-                        workingDirectory = resolver.workspaceDir.absolutePath,
-                        errorType = null,
-                        errorMessage = null,
-                        requestedAt = approvedToolCall.requestedAt,
-                        dispatchedAt = System.currentTimeMillis(),
-                        startedAt = System.currentTimeMillis(),
-                        completedAt = 0L,
-                        status = ToolExecutionStatus.RUNNING.name,
-                        artifacts = emptyList()
-                    )
-                )
-
-                logEvent(
-                    taskId = taskId,
-                    type = TimelineEventType.TOOL_STARTED,
-                    title = "Executing Approved Tool: $toolName",
-                    details = "Executing approved action: ${pendingApproved.proposedAction}",
-                    toolCallId = callId
-                )
-
-                val toolResult = try {
-                    toolDispatcher.dispatch(
-                        toolCall = approvedToolCall,
-                        resolver = resolver,
-                        autonomyLevel = preferencesManager.autonomyLevel.value,
-                        isPreApproved = true
-                    )
-                } catch (e: CancellationException) {
-                    toolExecutionDao.insertExecution(
-                        ToolExecutionEntity(
-                            callId = callId,
-                            taskId = taskId,
-                            toolName = toolName,
-                            argumentsJson = argsJson,
-                            success = false,
-                            exitCode = 130,
-                            stdout = "",
-                            stderr = "Execution cancelled",
-                            durationMs = 0L,
-                            workingDirectory = resolver.workspaceDir.absolutePath,
-                            errorType = "CANCELLED",
-                            errorMessage = "Execution cancelled",
-                            status = ToolExecutionStatus.CANCELLED.name
-                        )
-                    )
-                    throw e
-                } catch (e: Exception) {
-                    ToolResult(
-                        callId = callId,
-                        taskId = taskId,
-                        success = false,
-                        exitCode = 1,
-                        stdout = "",
-                        stderr = "Dispatch error: ${e.message}",
-                        durationMs = 0L,
-                        workingDirectory = resolver.workspaceDir.absolutePath,
-                        errorType = "DISPATCH_EXCEPTION",
-                        errorMessage = e.message ?: "Dispatch exception",
-                        status = ToolExecutionStatus.FAILED
-                    )
-                }
-
-                val verifiedArtifacts = toolResult.artifacts.filter { path ->
-                    val f = resolver.resolve(path)
-                    if (!f.exists() || !f.isFile || f.length() == 0L) return@filter false
-                    val baseline = preExecutionBaseline[path]
-                    val wasModified = baseline == null || f.lastModified() != baseline.lastModified || f.length() != baseline.size
-                    wasModified && f.lastModified() >= (approvedToolCall.requestedAt - 2000L) && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
-                }
-
-                // Persist execution record immediately
-                toolExecutionDao.insertExecution(
-                    ToolExecutionEntity(
-                        callId = callId,
-                        taskId = taskId,
-                        toolName = toolName,
-                        argumentsJson = argsJson,
-                        success = toolResult.success,
-                        exitCode = toolResult.exitCode,
-                        stdout = toolResult.stdout.take(50000),
-                        stderr = toolResult.stderr.take(50000),
-                        durationMs = toolResult.durationMs,
-                        workingDirectory = toolResult.workingDirectory,
-                        errorType = toolResult.errorType,
-                        errorMessage = toolResult.errorMessage,
-                        requestedAt = approvedToolCall.requestedAt,
-                        dispatchedAt = toolResult.startedAt,
-                        startedAt = toolResult.startedAt,
-                        completedAt = toolResult.completedAt,
-                        status = toolResult.status.name,
-                        artifacts = verifiedArtifacts
-                    )
-                )
-
-                contextManager.storeObservation(resolver, callId, toolResult.stdout, toolResult.stderr)
-                recentToolResults.add(Pair(toolName, toolResult.copy(artifacts = verifiedArtifacts)))
-
-                for (createdPath in verifiedArtifacts) {
-                    artifactManager.registerArtifactFromTool(taskId, createdPath, callId, resolver)
-                }
-                artifactManager.discoverArtifacts(
-                    taskId = taskId,
-                    resolver = resolver,
-                    activeToolInvocationId = callId,
-                    executionStartTime = approvedToolCall.requestedAt,
-                    preExecutionBaseline = preExecutionBaseline
-                )
-
-                logEvent(
-                    taskId = taskId,
-                    type = TimelineEventType.TOOL_COMPLETED,
-                    title = "Tool Completed: $toolName (${if (toolResult.success) "Success" else "Exit ${toolResult.exitCode}"})",
-                    details = if (toolResult.success) "Duration: ${toolResult.durationMs}ms" else (toolResult.errorMessage ?: toolResult.stderr.take(150)),
-                    toolCallId = callId,
-                    durationMs = toolResult.durationMs,
-                    isSuccess = toolResult.success
-                )
-
-                val obsDetails = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800)
-                logEvent(
-                    taskId = taskId,
-                    type = TimelineEventType.OBSERVATION,
-                    title = "Observation: $toolName",
-                    details = obsDetails,
-                    toolCallId = callId,
-                    durationMs = toolResult.durationMs,
-                    isSuccess = toolResult.success
-                )
-
-                advancePlanStepProgress(taskId, toolName, argsJson, toolResult, resolver, task)
-            }
+            executePendingApprovedCall(taskId, currentIteration, resolver, preExecutionBaseline, task, recentToolResults)
 
             while (sessionScope.isActive && currentIteration < maxIterations) {
                 task = taskDao.getTaskById(taskId)?.toDomain() ?: break
@@ -713,45 +1378,24 @@ class SessionOrchestrator(
                 )
                 taskDao.updateTask(TaskEntity.fromDomain(task))
 
-                // Refresh artifacts and steps
                 val artifacts = artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
                 planSteps = planStepDao.getStepsForTask(taskId).map { it.toDomain() }
 
-                // Check Deterministic Execution vs LLM Consultation
                 val apiKey = preferencesManager.nvidiaApiKey.value.trim()
                 if (apiKey.isBlank()) {
-                    executeDeterministicStep(task, planSteps, resolver, currentIteration)
-                    val discovered = artifactManager.discoverArtifacts(taskId, resolver, preExecutionBaseline = preExecutionBaseline)
-
-                    // Verify objective immediately with execution-scoped evidence
-                    val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
-                    val verification = verificationEngine.verifyTaskObjective(
-                        task = task,
-                        resolver = resolver,
-                        registeredArtifacts = currentTaskArtifacts,
-                        preExecutionBaseline = preExecutionBaseline
-                    )
-                    if (verification.isVerified) {
-                        logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", verification.summary)
-                        task = completeTask(task, verification.summary, resolver, planSteps, verification.status)
-                        break // STOP ITERATING IMMEDIATELY!
-                    } else if (currentIteration >= 2) {
-                        taskDao.updateTask(
-                            TaskEntity.fromDomain(
-                                task.copy(
-                                    status = TaskStatus.FAILED,
-                                    lastError = "Deterministic execution could not satisfy objective: ${verification.summary}"
-                                )
-                            )
-                        )
-                        logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", verification.summary)
-                        break
+                    when (val detOutcome = handleDeterministicStepBranch(task, planSteps, resolver, preExecutionBaseline, currentIteration)) {
+                        is DeterministicStepOutcome.GoalCompleted -> {
+                            task = detOutcome.task
+                            break
+                        }
+                        is DeterministicStepOutcome.FailedAndHalted -> break
+                        is DeterministicStepOutcome.ContinueToNextIteration -> {
+                            delay(250)
+                            continue
+                        }
                     }
-                    delay(250)
-                    continue
                 }
 
-                // Pre-turn verification evaluation to provide authoritative ground truth to LLM
                 val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
                 val preTurnVerification = verificationEngine.verifyTaskObjective(
                     task = task,
@@ -761,7 +1405,6 @@ class SessionOrchestrator(
                     recentToolResults = recentToolResults
                 )
 
-                // Check Replanner recommendation if the latest execution failed or loop warnings are active
                 val lastResult = recentToolResults.lastOrNull()?.second
                 val shouldReplan = (lastResult != null && !lastResult.success) || !loopWarning.isNullOrBlank()
                 val replanDecision = if (shouldReplan) {
@@ -784,7 +1427,6 @@ class SessionOrchestrator(
 
                 val allExecutionsForTask = toolExecutionDao.getAllExecutionsForTask(taskId)
 
-                // LLM Context Preparation with ground truth, full ledger, and replanner directives
                 val messages = contextManager.buildConversationMessages(
                     task = task,
                     project = project,
@@ -828,7 +1470,6 @@ class SessionOrchestrator(
                     logEvent(taskId, TimelineEventType.DECISION, "Agent Thought & Strategy", response.reasoning)
                 }
 
-                // Tool Execution Dispatch (native tool calls or parsed structured calls from content)
                 val parseResult = com.example.aragon.llm.ToolCallParser.parse(response.content)
                 val parsedContentCalls = when (parseResult) {
                     is com.example.aragon.llm.ToolParseResult.Success -> {
@@ -882,538 +1523,54 @@ class SessionOrchestrator(
                 }
 
                 if (allToolCalls.isNotEmpty()) {
-                    taskDao.updateStatus(taskId, TaskStatus.OBSERVING)
-                    var goalAchievedDuringTools = false
-                    val callOccurrenceMap = mutableMapOf<String, Int>()
-                    val seenCallIdsInResponse = mutableSetOf<String>()
-
-                    for (tc in allToolCalls) {
-                        val rawId = tc.id.trim()
-                        val isGeneric = rawId.isBlank() || com.example.aragon.llm.ToolCallParser.isSyntheticOrGenericId(rawId)
-                        val normArgs = tc.argumentsJson.trim()
-                        val argsHash = java.security.MessageDigest.getInstance("MD5")
-                            .digest(normArgs.toByteArray(Charsets.UTF_8))
-                            .take(4).joinToString("") { "%02x".format(it) }
-                        val canonicalToolName = com.example.aragon.tools.ToolRegistry.resolveCanonicalToolName(tc.name)
-                        val occurrenceKey = "${canonicalToolName}_${argsHash}"
-                        val occurrence = callOccurrenceMap.getOrDefault(occurrenceKey, 0)
-                        callOccurrenceMap[occurrenceKey] = occurrence + 1
-
-                        val callId = if (isGeneric) {
-                            "call_${taskId}_it${currentIteration}_${canonicalToolName}_${argsHash}_$occurrence"
-                        } else if (seenCallIdsInResponse.contains(rawId)) {
-                            "${rawId}_occ$occurrence"
-                        } else {
-                            val existingExec = toolExecutionDao.getExecutionByCallId(rawId)
-                            if (existingExec == null) {
-                                rawId
-                            } else if (existingExec.taskId != taskId || existingExec.iterationId != currentIteration) {
-                                "call_${taskId}_it${currentIteration}_${canonicalToolName}_${argsHash}_$occurrence"
-                            } else {
-                                "${rawId}_it${currentIteration}_occ$occurrence"
-                            }
-                        }
-                        seenCallIdsInResponse.add(callId)
-
-                        val toolCall = ToolCall(
-                            callId = callId,
-                            taskId = taskId,
-                            toolName = canonicalToolName,
-                            argumentsJson = tc.argumentsJson,
-                            iterationId = currentIteration,
-                            status = ToolExecutionStatus.CREATED
-                        )
-
-                        // Prevent duplicate execution if this call was already executed and completed in THIS iteration
-                        // Read-only inspection tools must NEVER be skipped across iterations (Scenario B & 8)
-                        val priorExecution = toolExecutionDao.getExecutionByCallId(callId)
-                        val isReadOnly = ToolDispatcher.isReadOnly(canonicalToolName, tc.argumentsJson)
-                        if (!isReadOnly && priorExecution != null && priorExecution.taskId == taskId && priorExecution.toolName == canonicalToolName &&
-                            areArgumentsEqual(priorExecution.argumentsJson, tc.argumentsJson) &&
-                            (priorExecution.status == ToolExecutionStatus.SUCCEEDED.name || 
-                             priorExecution.status == ToolExecutionStatus.FAILED.name || 
-                             priorExecution.status == ToolExecutionStatus.CANCELLED.name ||
-                             priorExecution.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH.name)) {
-                            recentToolResults.add(Pair(canonicalToolName, priorExecution.toDomainResult()))
-                            logEvent(
-                                taskId = taskId,
-                                type = TimelineEventType.OBSERVATION,
-                                title = "Reused Prior Execution: $canonicalToolName",
-                                details = "Tool call $callId was already completed (${priorExecution.status}). Reusing previous observation.",
-                                toolCallId = callId
-                            )
-                            continue
-                        }
-
-                        // 1. TOOL REQUESTED (Planned/Requested Intent)
-                        logEvent(
-                            taskId = taskId,
-                            type = TimelineEventType.TOOL_REQUESTED,
-                            title = "Tool Requested: $canonicalToolName",
-                            details = tc.argumentsJson,
-                            toolCallId = callId
-                        )
-
-                        // 2. TOOL DISPATCHED: Pre-dispatch persistent ledger entry in Room
-                        val preExecution = ToolExecutionEntity(
-                            callId = callId,
-                            taskId = taskId,
-                            toolName = canonicalToolName,
-                            argumentsJson = tc.argumentsJson,
-                            success = false,
-                            exitCode = -1,
-                            stdout = "",
-                            stderr = "",
-                            durationMs = 0L,
-                            workingDirectory = resolver.workspaceDir.absolutePath,
-                            errorType = null,
-                            errorMessage = null,
-                            requestedAt = toolCall.requestedAt,
-                            dispatchedAt = System.currentTimeMillis(),
-                            startedAt = System.currentTimeMillis(),
-                            completedAt = 0L,
-                            status = ToolExecutionStatus.DISPATCHED.name,
-                            artifacts = emptyList()
-                        )
-                        toolExecutionDao.insertExecution(preExecution)
-
-                        logEvent(
-                            taskId = taskId,
-                            type = TimelineEventType.TOOL_DISPATCHED,
-                            title = "Tool Dispatched: $canonicalToolName",
-                            details = "Validating parameters and dispatching to execution substrate",
-                            toolCallId = callId
-                        )
-
-                        // Pre-dispatch intercept: Prevent blind repetition of mutations after UNKNOWN_AFTER_PROCESS_DEATH (Scenario I & 8)
-                        val preDispatchLoop = loopDetector.checkPreDispatch(canonicalToolName, tc.argumentsJson)
-                        if (preDispatchLoop != null) {
-                            val blockedEntity = ToolExecutionEntity(
-                                callId = callId,
-                                taskId = taskId,
-                                toolName = canonicalToolName,
-                                argumentsJson = tc.argumentsJson,
-                                success = false,
-                                exitCode = 1,
-                                stdout = "",
-                                stderr = preDispatchLoop.reason,
-                                durationMs = 0L,
-                                workingDirectory = resolver.workspaceDir.absolutePath,
-                                errorType = "UNKNOWN_RETRY_BLOCKED",
-                                errorMessage = preDispatchLoop.reason,
-                                requestedAt = toolCall.requestedAt,
-                                dispatchedAt = System.currentTimeMillis(),
-                                startedAt = System.currentTimeMillis(),
-                                completedAt = System.currentTimeMillis(),
-                                status = ToolExecutionStatus.FAILED.name,
-                                artifacts = emptyList()
-                            )
-                            toolExecutionDao.insertExecution(blockedEntity)
-                            contextManager.storeObservation(resolver, callId, "", preDispatchLoop.reason)
-                            recentToolResults.add(Pair(canonicalToolName, blockedEntity.toDomainResult()))
-                            logEvent(
-                                taskId = taskId,
-                                type = TimelineEventType.ERROR,
-                                title = "Blind Mutation Blocked After UNKNOWN",
-                                details = preDispatchLoop.reason,
-                                toolCallId = callId
-                            )
+                    when (val toolsOutcome = executeIterationTools(
+                        taskId = taskId,
+                        allToolCalls = allToolCalls,
+                        resolver = resolver,
+                        preExecutionBaseline = preExecutionBaseline,
+                        currentIteration = currentIteration,
+                        recentToolResults = recentToolResults,
+                        loopDetector = loopDetector,
+                        initialTask = task,
+                        planSteps = planSteps,
+                        responseContent = response.content
+                    )) {
+                        is IterationToolsOutcome.GoalCompleted -> {
+                            task = toolsOutcome.task
                             break
                         }
-
-                        // 3. EXECUTION WITH RESILIENT RETRY & EXPONENTIAL BACKOFF
-                        var currentAttempt = 0
-                        val maxTransientRetries = 2
-                        var toolResult: ToolResult
-
-                        try {
-                            while (true) {
-                                toolResult = toolDispatcher.dispatch(
-                                    toolCall = toolCall,
-                                    resolver = resolver,
-                                    autonomyLevel = preferencesManager.autonomyLevel.value,
-                                    onStatusChange = { status ->
-                                        if (status == com.example.aragon.domain.model.ToolExecutionStatus.RUNNING ||
-                                            status == com.example.aragon.domain.model.ToolExecutionStatus.EXECUTING) {
-                                            sessionScope.launch {
-                                                toolExecutionDao.insertExecution(
-                                                    preExecution.copy(
-                                                        status = status.name,
-                                                        startedAt = System.currentTimeMillis()
-                                                    )
-                                                )
-                                                logEvent(
-                                                    taskId = taskId,
-                                                    type = TimelineEventType.TOOL_STARTED,
-                                                    title = "Tool ${if (status == ToolExecutionStatus.EXECUTING) "Executing" else "Running"}: $canonicalToolName${if (currentAttempt > 0) " (Retry #$currentAttempt)" else ""}",
-                                                    details = "Process started in environment",
-                                                    toolCallId = callId
-                                                )
-                                            }
-                                        }
-                                    }
-                                )
-
-                                if (toolResult.success || currentAttempt >= maxTransientRetries) {
-                                    break
-                                }
-
-                                // CRITICAL: UNKNOWN_AFTER_PROCESS_DEATH must NEVER be automatically retried
-                                if (toolResult.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
-                                    toolResult.terminationReason == "PROCESS_DIED_BEFORE_RESULT") {
-                                    break
-                                }
-
-                                // CRITICAL: Only READ_ONLY or IDEMPOTENT_MUTATION operations may be retried on transient errors
-                                val semantics = ToolDispatcher.classifyOperation(canonicalToolName, tc.argumentsJson)
-                                val isRetrySafe = semantics == OperationSemantics.READ_ONLY || semantics == OperationSemantics.IDEMPOTENT_MUTATION
-                                if (!isRetrySafe) {
-                                    break
-                                }
-
-                                val isTransient = toolResult.timedOut ||
-                                    (toolResult.errorMessage.orEmpty() + " " + toolResult.stderr).let { err ->
-                                        val lower = err.lowercase()
-                                        lower.contains("timeout") || lower.contains("timed out") ||
-                                        lower.contains("429") || lower.contains("rate limit") ||
-                                        lower.contains("busy") || lower.contains("eagain") ||
-                                        lower.contains("connection reset") || lower.contains("socket closed")
-                                    }
-
-                                if (!isTransient) {
-                                    break
-                                }
-
-                                currentAttempt++
-                                val backoffDelayMs = (400L * (1L shl currentAttempt)) + (50..200).random()
-                                logEvent(
-                                    taskId = taskId,
-                                    type = TimelineEventType.REPLAN,
-                                    title = "Transient Failure: $canonicalToolName",
-                                    details = "Encountered transient error (${toolResult.errorType ?: "TIMEOUT/BUSY"}). Applying exponential backoff (${backoffDelayMs}ms) before retry $currentAttempt of $maxTransientRetries...",
-                                    toolCallId = callId
-                                )
-                                delay(backoffDelayMs)
-                            }
-                        } catch (e: CancellationException) {
-                            toolExecutionDao.insertExecution(
-                                preExecution.copy(
-                                    status = ToolExecutionStatus.CANCELLED.name,
-                                    completedAt = System.currentTimeMillis(),
-                                    errorType = "CANCELLED",
-                                    errorMessage = "Tool execution cancelled"
-                                )
-                            )
-                            throw e
-                        } catch (e: Exception) {
-                            toolResult = ToolResult(
-                                callId = callId,
-                                taskId = taskId,
-                                success = false,
-                                exitCode = 1,
-                                stdout = "",
-                                stderr = "Dispatch error: ${e.message}",
-                                durationMs = System.currentTimeMillis() - preExecution.dispatchedAt,
-                                workingDirectory = resolver.workspaceDir.absolutePath,
-                                errorType = "DISPATCH_EXCEPTION",
-                                errorMessage = e.message ?: "Unknown dispatch exception",
-                                status = ToolExecutionStatus.FAILED
-                            )
-                        }
-
-                        // Check if tool is waiting for human approval
-                        if (toolResult.status == ToolExecutionStatus.AWAITING_APPROVAL || (toolResult.cancelled && toolResult.terminationReason == "AWAITING_APPROVAL")) {
-                            toolExecutionDao.insertExecution(
-                                ToolExecutionEntity(
-                                    callId = callId,
-                                    taskId = taskId,
-                                    toolName = canonicalToolName,
-                                    argumentsJson = tc.argumentsJson,
-                                    success = false,
-                                    exitCode = 126,
-                                    stdout = "",
-                                    stderr = toolResult.stderr,
-                                    durationMs = 0L,
-                                    workingDirectory = toolResult.workingDirectory,
-                                    errorType = "AWAITING_APPROVAL",
-                                    errorMessage = toolResult.stderr,
-                                    requestedAt = toolCall.requestedAt,
-                                    dispatchedAt = toolResult.startedAt,
-                                    startedAt = toolResult.startedAt,
-                                    completedAt = toolResult.completedAt,
-                                    status = ToolExecutionStatus.AWAITING_APPROVAL.name
-                                )
-                            )
-                            taskDao.updateStatus(taskId, TaskStatus.AWAITING_APPROVAL)
-                            logEvent(taskId, TimelineEventType.APPROVAL_REQUESTED, "Approval Required", "Operation paused awaiting user confirmation.")
+                        is IterationToolsOutcome.SessionTerminated -> {
                             return
                         }
-
-                        val verifiedArtifacts = toolResult.artifacts.filter { path ->
-                            val f = resolver.resolve(path)
-                            if (!f.exists() || !f.isFile || f.length() == 0L) return@filter false
-                            val baseline = preExecutionBaseline[path]
-                            val wasModified = baseline == null || f.lastModified() != baseline.lastModified || f.length() != baseline.size
-                            wasModified && f.lastModified() >= (toolCall.requestedAt - 2000L) && com.example.aragon.artifacts.ArtifactValidator.validate(f).isValid
+                        is IterationToolsOutcome.AwaitingApproval -> {
+                            return
                         }
-
-                        // 4. PERSIST TOOL EXECUTION RECORD
-                        toolExecutionDao.insertExecution(
-                            ToolExecutionEntity(
-                                callId = callId,
-                                taskId = taskId,
-                                toolName = canonicalToolName,
-                                argumentsJson = tc.argumentsJson,
-                                success = toolResult.success,
-                                exitCode = toolResult.exitCode,
-                                stdout = toolResult.stdout.take(50000),
-                                stderr = toolResult.stderr.take(50000),
-                                durationMs = toolResult.durationMs,
-                                workingDirectory = toolResult.workingDirectory,
-                                errorType = toolResult.errorType,
-                                errorMessage = toolResult.errorMessage,
-                                requestedAt = toolCall.requestedAt,
-                                dispatchedAt = toolResult.startedAt,
-                                startedAt = toolResult.startedAt,
-                                completedAt = toolResult.completedAt,
-                                status = toolResult.status.name,
-                                artifacts = verifiedArtifacts
-                            )
-                        )
-
-                        // Store large observation on disk
-                        contextManager.storeObservation(resolver, callId, toolResult.stdout, toolResult.stderr)
-                        recentToolResults.add(Pair(canonicalToolName, toolResult.copy(artifacts = verifiedArtifacts)))
-
-                        metrics = metrics.copy(
-                            toolCallsCount = metrics.toolCallsCount + 1,
-                            successfulToolCalls = if (toolResult.success) metrics.successfulToolCalls + 1 else metrics.successfulToolCalls,
-                            failedToolCalls = if (!toolResult.success) metrics.failedToolCalls + 1 else metrics.failedToolCalls,
-                            commandsExecuted = if (canonicalToolName == "run_command") metrics.commandsExecuted + 1 else metrics.commandsExecuted
-                        )
-
-                        // 5. REGISTER REAL ARTIFACTS LINKED TO THIS INVOCATION
-                        for (createdPath in verifiedArtifacts) {
-                            artifactManager.registerArtifactFromTool(taskId, createdPath, callId, resolver)
+                        is IterationToolsOutcome.Done -> {
+                            task = toolsOutcome.task
+                            loopWarning = toolsOutcome.loopWarning
+                            metrics = task.metrics
+                            if (toolsOutcome.shouldBreak) break
                         }
-                        val currentDiscovered = artifactManager.discoverArtifacts(
-                            taskId = taskId,
-                            resolver = resolver,
-                            activeToolInvocationId = callId,
-                            executionStartTime = toolCall.requestedAt,
-                            preExecutionBaseline = preExecutionBaseline
-                        )
-
-                        // 6. TOOL COMPLETED EVENT
-                        val completionSummary = if (toolResult.success) {
-                            "Exit code: 0 • Duration: ${toolResult.durationMs}ms"
-                        } else {
-                            "Exit code: ${toolResult.exitCode} • ${toolResult.errorMessage ?: toolResult.stderr.take(150)}"
-                        }
-                        logEvent(
-                            taskId = taskId,
-                            type = TimelineEventType.TOOL_COMPLETED,
-                            title = "Tool Completed: $canonicalToolName (${if (toolResult.success) "Success" else "Exit ${toolResult.exitCode}"})",
-                            details = completionSummary,
-                            toolCallId = callId,
-                            durationMs = toolResult.durationMs,
-                            isSuccess = toolResult.success
-                        )
-
-                        // 7. OBSERVATION EVENT
-                        val obsDetails = if (toolResult.stdout.isNotBlank()) toolResult.stdout.take(800) else toolResult.stderr.take(800)
-                        logEvent(
-                            taskId = taskId,
-                            type = TimelineEventType.OBSERVATION,
-                            title = "Observation: $canonicalToolName",
-                            details = obsDetails,
-                            toolCallId = callId,
-                            durationMs = toolResult.durationMs,
-                            isSuccess = toolResult.success
-                        )
-
-                        // Update current active phase and subtask progress
-                        advancePlanStepProgress(taskId, canonicalToolName, tc.argumentsJson, toolResult.copy(artifacts = verifiedArtifacts), resolver, task)
-
-                        // If the agent explicitly called complete_task, evaluate verification immediately
-                        if (canonicalToolName == "complete_task") {
-                            val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
-                            val postToolVerification = verificationEngine.verifyTaskObjective(
-                                task = task,
-                                resolver = resolver,
-                                registeredArtifacts = currentTaskArtifacts,
-                                preExecutionBaseline = preExecutionBaseline,
-                                recentToolResults = recentToolResults,
-                                llmResponseContent = toolResult.stdout
-                            )
-                            if (postToolVerification.isVerified) {
-                                val goalSummary = runCatching { org.json.JSONObject(tc.argumentsJson).optString("summary", postToolVerification.summary) }.getOrDefault(postToolVerification.summary)
-                                logEvent(
-                                    taskId,
-                                    TimelineEventType.GOAL_COMPLETED,
-                                    "Goal Achieved ✓",
-                                    goalSummary
-                                )
-                                task = completeTask(task, goalSummary, resolver, planSteps, postToolVerification.status)
-                                goalAchievedDuringTools = true
-                                break // STOP IMMEDIATELY! NO MORE TOOLS OR LOOPS!
-                            } else {
-                                logEvent(
-                                    taskId,
-                                    TimelineEventType.ERROR,
-                                    "Completion Rejected: Unmet Criteria",
-                                    "The agent called complete_task, but objective verification failed: ${postToolVerification.summary}."
-                                )
-                            }
-                        }
-
-                        // If host process died and outcome is UNKNOWN, halt remaining tools in batch to force state reconciliation (Scenario H & I)
-                        if (toolResult.status == ToolExecutionStatus.UNKNOWN_AFTER_PROCESS_DEATH ||
-                            toolResult.terminationReason == "PROCESS_DIED_BEFORE_RESULT") {
-                            logEvent(
-                                taskId = taskId,
-                                type = TimelineEventType.ERROR,
-                                title = "Host Process Died: UNKNOWN Outcome",
-                                details = "Halting remaining tool invocations in this batch. Forcing state reconciliation.",
-                                toolCallId = callId
-                            )
-                            break
-                        }
-
-                        // LOOP / STAGNATION DETECTION
-                        val loopAnalysis = loopDetector.record(tc.name, tc.argumentsJson, toolResult)
-                        if (loopAnalysis.isLooping) {
-                            loopWarning = loopAnalysis.reason
-                            contextManager.recordFailedApproach(taskId, tc.name, loopAnalysis.reason, tc.argumentsJson)
-                            logEvent(taskId, TimelineEventType.ERROR, "Loop Detected (${loopAnalysis.loopType})", loopAnalysis.reason)
-
-                            if (loopAnalysis.shouldTerminateBlocked) {
-                                safeUpdateTask(
-                                    TaskEntity.fromDomain(
-                                        task.copy(
-                                            status = TaskStatus.BLOCKED,
-                                            lastError = loopAnalysis.reason
-                                        )
-                                    )
-                                )
-                                logEvent(
-                                    taskId,
-                                    TimelineEventType.STATUS_CHANGE,
-                                    "Execution Blocked (Stagnation)",
-                                    "Halted execution safely: ${loopAnalysis.reason}"
-                                )
-                                activeSessions.remove(taskId)
-                                return
-                            }
-
-                            // Replanning triggered by loop
-                            safeUpdateStatus(taskId, TaskStatus.REPLANNING)
-                            val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
-                            val currentVerification = verificationEngine.verifyTaskObjective(
-                                task = task,
-                                resolver = resolver,
-                                registeredArtifacts = currentTaskArtifacts,
-                                preExecutionBaseline = preExecutionBaseline,
-                                recentToolResults = recentToolResults
-                            )
-                            val decision = replanner.analyzeAndReplan(
-                                task, planSteps, contextManager.getFailedApproaches(taskId),
-                                recentToolResults, currentDiscovered, currentVerification, resolver
-                            )
-
-                            if (decision.type == ReplanDecisionType.COMPLETE) {
-                                task = completeTask(task, decision.explanation, resolver, planSteps, currentVerification.status)
-                                goalAchievedDuringTools = true
-                                break
-                            } else if (decision.type == ReplanDecisionType.ABORT) {
-                                safeUpdateTask(TaskEntity.fromDomain(task.copy(status = TaskStatus.BLOCKED, lastError = decision.explanation)))
-                                logEvent(taskId, TimelineEventType.ERROR, "Strategies Exhausted", decision.explanation)
-                                activeSessions.remove(taskId)
-                                return
-                            }
-
-                            logEvent(taskId, TimelineEventType.REPLAN, "Replanner Activated", decision.explanation)
-                        } else {
-                            loopWarning = null
-                        }
-                    }
-
-                    if (goalAchievedDuringTools) {
-                        break // Break out of while loop
-                    }
-
-                    // Post-turn verification: check if all tools in turn executed and objective criteria are met
-                    val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
-                    val postTurnVerification = verificationEngine.verifyTaskObjective(
-                        task = task,
-                        resolver = resolver,
-                        registeredArtifacts = currentTaskArtifacts,
-                        preExecutionBaseline = preExecutionBaseline,
-                        recentToolResults = recentToolResults,
-                        llmResponseContent = response.content
-                    )
-                    if (postTurnVerification.isVerified && response.content.isNotBlank() && !com.example.aragon.llm.ToolCallParser.isGenericPreamble(response.content)) {
-                        logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { postTurnVerification.summary })
-                        task = completeTask(task, response.content.ifBlank { postTurnVerification.summary }, resolver, planSteps, postTurnVerification.status)
-                        break
                     }
                 } else {
-                    // Model finished generating text without tool calls
-                    logEvent(taskId, TimelineEventType.RESULT, "Model Response", response.content)
-
-                    val isClaimingWithoutExecution = com.example.aragon.llm.ToolCallParser.isClaimingExecutionWithoutToolCall(response.content)
-                    if (isClaimingWithoutExecution) {
-                        val claimWarning = "Model described actions or claimed completion in conversational text without invoking a structured tool. No actions executed."
-                        logEvent(
-                            taskId,
-                            TimelineEventType.ERROR,
-                            "Unverified Prose Claim",
-                            claimWarning
-                        )
-                        contextManager.recordFailedApproach(
-                            taskId = taskId,
-                            strategy = "conversational_claim_without_tool",
-                            error = claimWarning,
-                            context = response.content.take(200)
-                        )
-                        unverifiedClaimFeedback = "In the previous turn, you described actions or claimed completion in conversational text without invoking a structured tool. No actions were executed and no files were created. Do not output conversational apologies or explanations. Immediately invoke a structured tool (e.g. document_create, file_write, run_command) using the tool call format to perform the action."
-                    }
-
-                    safeUpdateStatus(taskId, TaskStatus.VERIFYING)
-                    val currentTaskArtifacts = artifactDao.getArtifactsForTask(taskId)
-                    val verification = verificationEngine.verifyTaskObjective(
-                        task = task,
+                    when (val textOutcome = handleTextResponseWithoutTools(
+                        taskId = taskId,
+                        response = response,
                         resolver = resolver,
-                        registeredArtifacts = currentTaskArtifacts,
                         preExecutionBaseline = preExecutionBaseline,
+                        currentIteration = currentIteration,
+                        maxIterations = maxIterations,
                         recentToolResults = recentToolResults,
-                        llmResponseContent = response.content
-                    )
-
-                    if (verification.isVerified) {
-                        logEvent(taskId, TimelineEventType.GOAL_COMPLETED, "Goal Achieved ✓", response.content.ifBlank { verification.summary })
-                        task = completeTask(task, response.content.ifBlank { verification.summary }, resolver, planSteps, verification.status)
-                        break
-                    } else {
-                        // Deliverables or criteria are unmet and model did not call tools
-                        logEvent(
-                            taskId,
-                            TimelineEventType.REASONING,
-                            "Objective Verification Unmet",
-                            "Objective criteria unmet (${verification.summary}). You must call structured tools (e.g. document_create, file_write, run_command) to satisfy requirements."
-                        )
-                        if (currentIteration >= maxIterations - 1) {
-                            safeUpdateTask(
-                                TaskEntity.fromDomain(
-                                    task.copy(
-                                        status = TaskStatus.FAILED,
-                                        lastError = "Objective criteria unmet: ${verification.summary}"
-                                    )
-                                )
-                            )
-                            logEvent(taskId, TimelineEventType.ERROR, "Goal Incomplete", verification.summary)
-                            logEvent(taskId, TimelineEventType.STATUS_CHANGE, "Session Terminated: FAILED", "Required criteria were not satisfied: ${verification.summary}")
+                        task = task,
+                        planSteps = planSteps
+                    )) {
+                        is TextResponseOutcome.GoalCompleted -> {
+                            task = textOutcome.task
                             break
+                        }
+                        is TextResponseOutcome.FailedAndHalted -> break
+                        is TextResponseOutcome.ContinueToNext -> {
+                            unverifiedClaimFeedback = textOutcome.unverifiedClaimFeedback
                         }
                     }
                 }
@@ -1435,7 +1592,6 @@ class SessionOrchestrator(
                 logEvent(taskId, TimelineEventType.ERROR, "Iteration Limit Reached", "Execution halted safely at $maxIterations iterations.")
             }
         } catch (e: CancellationException) {
-            // Re-throw to cooperate with structured concurrency and cancellation
             throw e
         } catch (e: Exception) {
             val currentTask = taskDao.getTaskById(taskId)
@@ -1758,8 +1914,8 @@ class SessionOrchestrator(
             }.getOrDefault(emptyList())
         }
 
-        val completedSummary = summary.trim().ifBlank {
-            if (task.finalSummary.isNotBlank()) task.finalSummary else verification.summary
+        val completedSummary: String = summary.trim().ifBlank {
+            task.finalSummary?.takeIf { it.isNotBlank() } ?: verification.summary
         }
 
         // ==========================================

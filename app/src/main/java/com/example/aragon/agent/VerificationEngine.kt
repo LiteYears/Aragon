@@ -19,20 +19,22 @@ data class VerificationEvidence(
 )
 
 sealed class ObjectiveVerification {
+    abstract val summary: String
+
     data class Satisfied(
-        val summary: String,
+        override val summary: String,
         val evidence: List<VerificationEvidence>,
         val checks: List<VerificationCheck> = emptyList()
     ) : ObjectiveVerification()
 
     data class NotSatisfied(
-        val summary: String,
+        override val summary: String,
         val reasons: List<String>,
         val checks: List<VerificationCheck> = emptyList()
     ) : ObjectiveVerification()
 
     data class Inconclusive(
-        val summary: String,
+        override val summary: String,
         val reasons: List<String>,
         val recommendedAction: String,
         val checks: List<VerificationCheck> = emptyList()

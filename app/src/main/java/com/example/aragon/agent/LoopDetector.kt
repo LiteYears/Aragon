@@ -1,6 +1,7 @@
 package com.example.aragon.agent
 
 import com.example.aragon.domain.model.ToolResult
+import com.example.aragon.tools.ToolDispatcher
 
 enum class LoopType {
     NONE,
