@@ -184,40 +184,61 @@ class OpenSandboxClient(
             "$cleanUrl/command"
         )
 
-        for (endpoint in endpoints) {
-            try {
-                val requestBuilder = Request.Builder()
-                    .url(endpoint)
-                    .post(payload.toString().toRequestBody(jsonMediaType))
+        val isEmulated = emulatedSandboxes.containsKey(sandboxId) || sandboxId.startsWith("osb_")
+        var lastError: String? = null
 
-                applyAuthHeaders(requestBuilder, apiKey)
-                requestBuilder.header("X-Sandbox-ID", sandboxId)
+        if (!isEmulated) {
+            val callTimeout = (timeoutMs + 5000L).coerceAtLeast(10000L)
+            val callClient = okHttpClient.newBuilder()
+                .readTimeout(callTimeout, TimeUnit.MILLISECONDS)
+                .writeTimeout(callTimeout, TimeUnit.MILLISECONDS)
+                .callTimeout(callTimeout + 5000L, TimeUnit.MILLISECONDS)
+                .build()
 
-                val response = okHttpClient.newCall(requestBuilder.build()).execute()
-                if (response.isSuccessful) {
-                    val respBody = response.body?.string().orEmpty()
-                    val json = JSONObject(respBody)
-                    val duration = System.currentTimeMillis() - startTime
-                    val exitCode = json.optInt("exitCode", json.optInt("code", 0))
-                    val stdout = json.optString("stdout", json.optString("output", ""))
-                    val stderr = json.optString("stderr", json.optString("error", ""))
+            for (endpoint in endpoints) {
+                try {
+                    val requestBuilder = Request.Builder()
+                        .url(endpoint)
+                        .post(payload.toString().toRequestBody(jsonMediaType))
 
-                    return@withContext Result.success(
-                        OpenSandboxExecResult(
-                            exitCode = exitCode,
-                            stdout = stdout,
-                            stderr = stderr,
-                            durationMs = duration,
-                            isEmulated = false
+                    applyAuthHeaders(requestBuilder, apiKey)
+                    requestBuilder.header("X-Sandbox-ID", sandboxId)
+
+                    val response = callClient.newCall(requestBuilder.build()).execute()
+                    if (response.isSuccessful) {
+                        val respBody = response.body?.string().orEmpty()
+                        val json = JSONObject(respBody)
+                        val duration = System.currentTimeMillis() - startTime
+                        val exitCode = json.optInt("exitCode", json.optInt("code", 0))
+                        val stdout = json.optString("stdout", json.optString("output", ""))
+                        val stderr = json.optString("stderr", json.optString("error", ""))
+
+                        return@withContext Result.success(
+                            OpenSandboxExecResult(
+                                exitCode = exitCode,
+                                stdout = stdout,
+                                stderr = stderr,
+                                durationMs = duration,
+                                isEmulated = false
+                            )
                         )
-                    )
+                    } else {
+                        lastError = "HTTP ${response.code}: ${response.message}"
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    val isTimeout = e is java.net.SocketTimeoutException || e is java.io.InterruptedIOException || e.message?.contains("timeout", ignoreCase = true) == true
+                    lastError = if (isTimeout) "Command timed out after ${timeoutMs}ms" else (e.message ?: "Connection error")
                 }
-            } catch (_: Exception) {
-                // Try next endpoint or fallback
             }
+
+            // Live cluster operation failed. Do NOT fall back to fake in-memory emulation!
+            return@withContext Result.failure(
+                IOException("OpenSandbox live cluster command execution failed for container '$sandboxId': ${lastError ?: "Endpoints unreachable"}")
+            )
         }
 
-        // Standalone sandbox command execution
+        // Standalone sandbox command execution for emulated runtime
         val duration = (System.currentTimeMillis() - startTime).coerceAtLeast(15L)
         val emulatedResult = runEmulatedCommand(sandboxId, command, workingDir)
         Result.success(
@@ -252,34 +273,55 @@ class OpenSandboxClient(
             "$cleanUrl/code"
         )
 
-        for (endpoint in endpoints) {
-            try {
-                val requestBuilder = Request.Builder()
-                    .url(endpoint)
-                    .post(payload.toString().toRequestBody(jsonMediaType))
+        val isEmulated = emulatedSandboxes.containsKey(sandboxId) || sandboxId.startsWith("osb_")
+        var lastError: String? = null
 
-                applyAuthHeaders(requestBuilder, apiKey)
-                requestBuilder.header("X-Sandbox-ID", sandboxId)
+        if (!isEmulated) {
+            val callTimeout = (timeoutMs + 5000L).coerceAtLeast(10000L)
+            val callClient = okHttpClient.newBuilder()
+                .readTimeout(callTimeout, TimeUnit.MILLISECONDS)
+                .writeTimeout(callTimeout, TimeUnit.MILLISECONDS)
+                .callTimeout(callTimeout + 5000L, TimeUnit.MILLISECONDS)
+                .build()
 
-                val response = okHttpClient.newCall(requestBuilder.build()).execute()
-                if (response.isSuccessful) {
-                    val respBody = response.body?.string().orEmpty()
-                    val json = JSONObject(respBody)
-                    val duration = System.currentTimeMillis() - startTime
+            for (endpoint in endpoints) {
+                try {
+                    val requestBuilder = Request.Builder()
+                        .url(endpoint)
+                        .post(payload.toString().toRequestBody(jsonMediaType))
 
-                    return@withContext Result.success(
-                        OpenSandboxCodeResult(
-                            exitCode = json.optInt("exitCode", 0),
-                            stdout = json.optString("stdout", json.optString("output", "")),
-                            stderr = json.optString("stderr", ""),
-                            durationMs = duration,
-                            isEmulated = false
+                    applyAuthHeaders(requestBuilder, apiKey)
+                    requestBuilder.header("X-Sandbox-ID", sandboxId)
+
+                    val response = callClient.newCall(requestBuilder.build()).execute()
+                    if (response.isSuccessful) {
+                        val respBody = response.body?.string().orEmpty()
+                        val json = JSONObject(respBody)
+                        val duration = System.currentTimeMillis() - startTime
+
+                        return@withContext Result.success(
+                            OpenSandboxCodeResult(
+                                exitCode = json.optInt("exitCode", 0),
+                                stdout = json.optString("stdout", json.optString("output", "")),
+                                stderr = json.optString("stderr", ""),
+                                durationMs = duration,
+                                isEmulated = false
+                            )
                         )
-                    )
+                    } else {
+                        lastError = "HTTP ${response.code}: ${response.message}"
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    val isTimeout = e is java.net.SocketTimeoutException || e is java.io.InterruptedIOException || e.message?.contains("timeout", ignoreCase = true) == true
+                    lastError = if (isTimeout) "Python execution timed out after ${timeoutMs}ms" else (e.message ?: "Connection error")
                 }
-            } catch (_: Exception) {
-                // Continue
             }
+
+            // Live cluster operation failed. Do NOT fall back to fake in-memory emulation!
+            return@withContext Result.failure(
+                IOException("OpenSandbox live cluster python execution failed for container '$sandboxId': ${lastError ?: "Endpoints unreachable"}")
+            )
         }
 
         // Standalone execution: save script into sandbox files and emulate Python execution
@@ -293,12 +335,6 @@ class OpenSandboxClient(
         files["/workspace/script.py"] = code
         val relScriptName = scriptName.removePrefix("/workspace/").removePrefix("/")
         files[relScriptName] = code
-        emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-            put(scriptName, code)
-            put("/workspace/main.py", code)
-            put("/workspace/script.py", code)
-            put(relScriptName, code)
-        }
 
         // Also emulate file creation statements inside the python code
         val createdFiles = emulatePythonFileWrites(code, files)
@@ -333,39 +369,34 @@ class OpenSandboxClient(
 
         val normPath = if (path.startsWith("/")) path else "/workspace/$path"
         val relPath = path.removePrefix("/workspace/").removePrefix("/")
+        val isEmulated = emulatedSandboxes.containsKey(sandboxId) || sandboxId.startsWith("osb_")
 
-        try {
-            val requestBuilder = Request.Builder()
-                .url("$cleanUrl/sandboxes/$sandboxId/files")
-                .post(payload.toString().toRequestBody(jsonMediaType))
+        if (!isEmulated) {
+            try {
+                val requestBuilder = Request.Builder()
+                    .url("$cleanUrl/sandboxes/$sandboxId/files")
+                    .post(payload.toString().toRequestBody(jsonMediaType))
 
-            applyAuthHeaders(requestBuilder, apiKey)
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            if (response.isSuccessful) {
-                val files = emulatedFiles.getOrPut(sandboxId) { ConcurrentHashMap() }
-                files[path] = content
-                files[normPath] = content
-                files[relPath] = content
-                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-                    put(path, content)
-                    put(normPath, content)
-                    put(relPath, content)
+                applyAuthHeaders(requestBuilder, apiKey)
+                val response = okHttpClient.newCall(requestBuilder.build()).execute()
+                if (response.isSuccessful) {
+                    val files = emulatedFiles.getOrPut(sandboxId) { ConcurrentHashMap() }
+                    files[path] = content
+                    files[normPath] = content
+                    files[relPath] = content
+                    return@withContext Result.success(true)
+                } else {
+                    return@withContext Result.failure(IOException("Failed to write file to live sandbox '$sandboxId' (HTTP ${response.code}: ${response.message})"))
                 }
-                return@withContext Result.success(true)
+            } catch (e: Exception) {
+                return@withContext Result.failure(IOException("Failed to write file to live sandbox '$sandboxId': ${e.message}"))
             }
-        } catch (_: Exception) {
-            // Emulate file write
         }
 
         val files = emulatedFiles.getOrPut(sandboxId) { ConcurrentHashMap() }
         files[path] = content
         files[normPath] = content
         files[relPath] = content
-        emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-            put(path, content)
-            put(normPath, content)
-            put(relPath, content)
-        }
         Result.success(true)
     }
 
@@ -376,21 +407,26 @@ class OpenSandboxClient(
         path: String
     ): Result<String> = withContext(Dispatchers.IO) {
         val cleanUrl = sanitizeUrl(serverUrl)
+        val isEmulated = emulatedSandboxes.containsKey(sandboxId) || sandboxId.startsWith("osb_")
 
-        try {
-            val requestBuilder = Request.Builder()
-                .url("$cleanUrl/sandboxes/$sandboxId/files?path=${java.net.URLEncoder.encode(path, "UTF-8")}")
-                .get()
+        if (!isEmulated) {
+            try {
+                val requestBuilder = Request.Builder()
+                    .url("$cleanUrl/sandboxes/$sandboxId/files?path=${java.net.URLEncoder.encode(path, "UTF-8")}")
+                    .get()
 
-            applyAuthHeaders(requestBuilder, apiKey)
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string().orEmpty()
-                val text = runCatching { JSONObject(body).optString("content", body) }.getOrDefault(body)
-                return@withContext Result.success(text)
+                applyAuthHeaders(requestBuilder, apiKey)
+                val response = okHttpClient.newCall(requestBuilder.build()).execute()
+                if (response.isSuccessful) {
+                    val body = response.body?.string().orEmpty()
+                    val text = runCatching { JSONObject(body).optString("content", body) }.getOrDefault(body)
+                    return@withContext Result.success(text)
+                } else {
+                    return@withContext Result.failure(IOException("Failed to read file from live sandbox '$sandboxId' (HTTP ${response.code}: ${response.message})"))
+                }
+            } catch (e: Exception) {
+                return@withContext Result.failure(IOException("Failed to read file from live sandbox '$sandboxId': ${e.message}"))
             }
-        } catch (_: Exception) {
-            // Emulate file read
         }
 
         val normPath = if (path.startsWith("/")) path else "/workspace/$path"
@@ -398,13 +434,11 @@ class OpenSandboxClient(
 
         val files = emulatedFiles[sandboxId]
         val content = files?.get(path) ?: files?.get(normPath) ?: files?.get(relPath)
-            ?: emulatedFiles["osb_default"]?.get(path) ?: emulatedFiles["osb_default"]?.get(normPath) ?: emulatedFiles["osb_default"]?.get(relPath)
-            ?: emulatedFiles.values.firstNotNullOfOrNull { it[path] ?: it[normPath] ?: it[relPath] }
 
         if (content != null) {
             Result.success(content)
         } else {
-            Result.failure(IOException("File not found in sandbox: $path"))
+            Result.failure(IOException("File not found in sandbox '$sandboxId': $path"))
         }
     }
 
@@ -466,10 +500,6 @@ class OpenSandboxClient(
 
                 val scriptCode = files[fullPath] ?: files[scriptPath] ?: files[relPath]
                     ?: files["/workspace/main.py"] ?: files["/workspace/script.py"]
-                    ?: emulatedFiles["osb_default"]?.get(fullPath)
-                    ?: emulatedFiles["osb_default"]?.get(scriptPath)
-                    ?: emulatedFiles["osb_default"]?.get(relPath)
-                    ?: emulatedFiles.values.firstNotNullOfOrNull { it[fullPath] ?: it[scriptPath] ?: it[relPath] }
 
                 if (scriptCode != null) {
                     val created = emulatePythonFileWrites(scriptCode, files)
@@ -492,11 +522,6 @@ class OpenSandboxClient(
                 files[fullPath] = content
                 files[after] = content
                 files[relPath] = content
-                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-                    put(fullPath, content)
-                    put(after, content)
-                    put(relPath, content)
-                }
                 Triple(0, "", "")
             }
             trimmed.startsWith("touch ") -> {
@@ -506,11 +531,6 @@ class OpenSandboxClient(
                 files.putIfAbsent(fullPath, "")
                 files.putIfAbsent(path, "")
                 files.putIfAbsent(relPath, "")
-                emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-                    putIfAbsent(fullPath, "")
-                    putIfAbsent(path, "")
-                    putIfAbsent(relPath, "")
-                }
                 Triple(0, "", "")
             }
             trimmed.startsWith("echo ") -> {
@@ -593,7 +613,6 @@ Swap:              0           0           0
                 files.remove(fullPath)
                 files.remove(target)
                 files.remove(relPath)
-                emulatedFiles["osb_default"]?.remove(fullPath)
                 Triple(0, "", "")
             }
             trimmed.startsWith("head ") -> {
@@ -624,10 +643,6 @@ Swap:              0           0           0
             trimmed.startsWith("ls") -> {
                 val allFiles = mutableSetOf<String>()
                 files.keys.forEach { allFiles.add(it) }
-                emulatedFiles["osb_default"]?.keys?.forEach { allFiles.add(it) }
-                for (store in emulatedFiles.values) {
-                    allFiles.addAll(store.keys)
-                }
                 val fileList = allFiles.map {
                     it.removePrefix("/workspace/").removePrefix("$normWorkingDir/").removePrefix("/").substringBefore("/")
                 }.filter { it.isNotBlank() && !it.startsWith(".") && it != "workspace" }.distinct()
@@ -639,10 +654,6 @@ Swap:              0           0           0
                 val fullPath = if (path.startsWith("/")) path else "$normWorkingDir/$path"
                 val relPath = path.removePrefix("/workspace/").removePrefix("/")
                 val content = files[fullPath] ?: files[path] ?: files[relPath]
-                    ?: emulatedFiles["osb_default"]?.get(fullPath)
-                    ?: emulatedFiles["osb_default"]?.get(path)
-                    ?: emulatedFiles["osb_default"]?.get(relPath)
-                    ?: emulatedFiles.values.firstNotNullOfOrNull { it[fullPath] ?: it[path] ?: it[relPath] }
                 if (content != null) Triple(0, content, "") else Triple(1, "", "cat: $path: No such file or directory")
             }
             trimmed.startsWith("uname") -> {
@@ -687,11 +698,6 @@ Swap:              0           0           0
             files[fullPath] = content
             files[filename] = content
             files[relPath] = content
-            emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-                put(fullPath, content)
-                put(filename, content)
-                put(relPath, content)
-            }
             created.add(fullPath)
         }
 
@@ -707,11 +713,6 @@ Swap:              0           0           0
             files[fullPath] = dummyContent
             files[filename] = dummyContent
             files[relPath] = dummyContent
-            emulatedFiles.getOrPut("osb_default") { ConcurrentHashMap() }.apply {
-                put(fullPath, dummyContent)
-                put(filename, dummyContent)
-                put(relPath, dummyContent)
-            }
             created.add(fullPath)
         }
 

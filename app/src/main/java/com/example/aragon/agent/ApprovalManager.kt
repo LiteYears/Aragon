@@ -120,8 +120,21 @@ class ApprovalManager {
         return request
     }
 
-    fun grantApproval(requestId: String) {
-        updateRequestStatus(requestId, ApprovalStatus.APPROVED)
+    fun grantApproval(requestId: String): Boolean {
+        var granted = false
+        requests.computeIfPresent(requestId) { _, existing ->
+            val isExpired = existing.expiresAt != null && System.currentTimeMillis() > existing.expiresAt
+            if (existing.status == ApprovalStatus.PENDING && !isExpired) {
+                granted = true
+                existing.copy(status = ApprovalStatus.APPROVED)
+            } else if (isExpired && existing.status == ApprovalStatus.PENDING) {
+                existing.copy(status = ApprovalStatus.EXPIRED)
+            } else {
+                existing
+            }
+        }
+        updatePendingFlow()
+        return granted
     }
 
     fun denyApproval(requestId: String) {
@@ -153,6 +166,8 @@ class ApprovalManager {
     fun isApprovedForCall(toolCallId: String): Boolean {
         if (consumedApprovals.contains(toolCallId)) return false
         val req = requests.values.find { it.toolCallId == toolCallId } ?: return false
+        val isExpired = req.expiresAt != null && System.currentTimeMillis() > req.expiresAt
+        if (isExpired) return false
         return req.status == ApprovalStatus.APPROVED
     }
 
@@ -176,9 +191,12 @@ class ApprovalManager {
      */
     @Synchronized
     fun consumeApprovedRequestForTask(taskId: String): ApprovalRequest? {
+        val now = System.currentTimeMillis()
         val approved = requests.values.firstOrNull { req ->
+            val isExpired = req.expiresAt != null && now > req.expiresAt
             req.taskId == taskId &&
                 req.status == ApprovalStatus.APPROVED &&
+                !isExpired &&
                 !req.toolCallId.isNullOrBlank() &&
                 !consumedApprovals.contains(req.toolCallId)
         } ?: return null
@@ -188,7 +206,11 @@ class ApprovalManager {
     }
 
     fun getPendingForTask(taskId: String): List<ApprovalRequest> {
-        return requests.values.filter { it.taskId == taskId && it.status == ApprovalStatus.PENDING }
+        val now = System.currentTimeMillis()
+        return requests.values.filter { req ->
+            val isExpired = req.expiresAt != null && now > req.expiresAt
+            req.taskId == taskId && req.status == ApprovalStatus.PENDING && !isExpired
+        }
     }
 
     private fun updateRequestStatus(requestId: String, status: ApprovalStatus) {
@@ -199,8 +221,12 @@ class ApprovalManager {
     }
 
     private fun updatePendingFlow() {
+        val now = System.currentTimeMillis()
         _pendingRequests.value = requests.values
-            .filter { it.status == ApprovalStatus.PENDING }
+            .filter { req ->
+                val isExpired = req.expiresAt != null && now > req.expiresAt
+                req.status == ApprovalStatus.PENDING && !isExpired
+            }
             .sortedBy { it.createdAt }
     }
 }

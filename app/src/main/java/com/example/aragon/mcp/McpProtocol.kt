@@ -135,6 +135,7 @@ class McpManager(
                 errorResult(callId, taskId, "MCP Server '${targetServer.name}' has no active transport", startTime)
             }
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             errorResult(callId, taskId, "MCP tool execution failed: ${e.message}", startTime)
         }
     }
@@ -272,16 +273,7 @@ class McpManager(
                 successResult(callId, taskId, mcpOutput.toString(2), startTime, "/workspace")
             }
             else -> {
-                // Return structured success for other embedded MCP calls
-                val mcpOutput = JSONObject().apply {
-                    put("content", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("type", "text")
-                            put("text", "MCP embedded server '$serverName' executed '$toolName' successfully with args: $arguments")
-                        })
-                    })
-                }
-                successResult(callId, taskId, mcpOutput.toString(2), startTime, "/workspace")
+                errorResult(callId, taskId, "MCP embedded tool '$toolName' is not implemented on server '$serverName'", startTime)
             }
         }
     }
@@ -320,7 +312,8 @@ class McpManager(
                     }
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             // Log or fallback
         }
         tools
@@ -352,12 +345,33 @@ class McpManager(
             client.newCall(request).execute().use { response ->
                 if (response.isSuccessful) {
                     val body = response.body?.string().orEmpty()
+                    val json = runCatching { JSONObject(body) }.getOrNull()
+
+                    // Check for JSON-RPC 2.0 protocol error
+                    if (json != null && json.has("error")) {
+                        val errObj = json.optJSONObject("error")
+                        val errCode = errObj?.optInt("code", -1) ?: -1
+                        val errMsg = errObj?.optString("message", "") ?: json.optString("error", "Unknown error")
+                        return@withContext errorResult(callId, taskId, "MCP Server error [$errCode]: $errMsg", startTime)
+                    }
+
+                    // Check for MCP tool execution error flag inside result
+                    val resultObj = json?.optJSONObject("result")
+                    if (resultObj != null && resultObj.optBoolean("isError", false)) {
+                        val contentArr = resultObj.optJSONArray("content")
+                        val errText = (0 until (contentArr?.length() ?: 0)).mapNotNull { i ->
+                            contentArr?.optJSONObject(i)?.optString("text")
+                        }.joinToString("\n").ifBlank { "Remote MCP tool signaled execution error" }
+                        return@withContext errorResult(callId, taskId, "MCP tool error: $errText", startTime)
+                    }
+
                     successResult(callId, taskId, body, startTime, "/workspace")
                 } else {
                     errorResult(callId, taskId, "MCP Server returned HTTP ${response.code}: ${response.message}", startTime)
                 }
             }
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             errorResult(callId, taskId, "Remote MCP call error: ${e.message}", startTime)
         }
     }

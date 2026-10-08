@@ -42,8 +42,10 @@ class ToolExecutor(
         val startTime = System.currentTimeMillis()
         val args = runCatching { JSONObject(argumentsJson) }.getOrDefault(JSONObject())
 
+        val canonical = ToolRegistry.resolveCanonicalToolName(toolName)
+
         try {
-            when (toolName) {
+            when (canonical) {
                 "run_command" -> executeRunCommand(callId, taskId, args, resolver, startTime)
                 "python_execute" -> executePython(callId, taskId, args, resolver, startTime)
                 "text_editor" -> executeTextEditor(callId, taskId, args, resolver)
@@ -226,21 +228,33 @@ class ToolExecutor(
         val isSandboxBackend = preferencesManager?.executionBackend?.value == com.example.aragon.domain.model.ExecutionBackend.OPEN_SANDBOX
         if (isSandboxBackend && openSandboxManager != null) {
             val sbResult = openSandboxManager.executePythonCode(code, timeoutMs)
-            openSandboxManager.syncSandboxToLocal(resolver)
+            val syncResult = openSandboxManager.syncSandboxToLocalDetailed(resolver)
 
-            val pythonArtifacts = if (localTargetFile.exists() && localTargetFile.isFile) listOf(targetLogicalPath) else emptyList()
+            val syncFailed = !syncResult.isSuccess
+            val finalSuccess = sbResult.exitCode == 0 && !syncFailed
+            // Stale file defense: only count local file as verified if sync succeeded and file is fresh
+            val pythonArtifacts = if (finalSuccess && localTargetFile.exists() && localTargetFile.isFile && localTargetFile.lastModified() >= (startTime - 2000L)) {
+                listOf(targetLogicalPath)
+            } else {
+                emptyList()
+            }
+            val combinedStderr = if (syncResult.isSuccess || syncResult.errorMessage.isNullOrBlank()) {
+                sbResult.stderr
+            } else {
+                "${sbResult.stderr}\n[OpenSandbox Error: File synchronization failed: ${syncResult.errorMessage}]".trim()
+            }
             return ToolResult(
                 callId = callId,
                 taskId = taskId,
-                success = sbResult.exitCode == 0,
-                exitCode = sbResult.exitCode,
+                success = finalSuccess,
+                exitCode = if (finalSuccess) 0 else if (sbResult.exitCode != 0) sbResult.exitCode else 1,
                 stdout = sbResult.stdout,
-                stderr = sbResult.stderr,
+                stderr = combinedStderr,
                 artifacts = pythonArtifacts,
                 durationMs = System.currentTimeMillis() - startTime,
                 workingDirectory = "/workspace",
-                errorType = if (sbResult.exitCode != 0) "OPENSANDBOX_PYTHON_ERROR" else null,
-                errorMessage = if (sbResult.exitCode != 0) sbResult.stderr else null
+                errorType = if (sbResult.exitCode != 0) "OPENSANDBOX_PYTHON_ERROR" else if (syncFailed) "OPENSANDBOX_SYNC_FAILED" else null,
+                errorMessage = if (sbResult.exitCode != 0) sbResult.stderr else if (syncFailed) syncResult.errorMessage else null
             )
         }
 

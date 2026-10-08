@@ -53,7 +53,17 @@ class ContextManager(
         obsDir.mkdirs()
 
         val obsFile = File(obsDir, "obs_${callId}.log")
-        obsFile.writeText("=== STDOUT ===\n$stdout\n\n=== STDERR ===\n$stderr\n")
+        val stdoutHeader = if (stdout.contains("[STDOUT Capped") || stdout.contains("[STDOUT Truncated")) {
+            "=== STDOUT (Retained buffer: ${stdout.length} chars; stream capped at memory retention limit) ==="
+        } else {
+            "=== STDOUT (Retained buffer: ${stdout.length} chars) ==="
+        }
+        val stderrHeader = if (stderr.contains("[STDERR Capped") || stderr.contains("[STDERR Truncated")) {
+            "=== STDERR (Retained buffer: ${stderr.length} chars; stream capped at memory retention limit) ==="
+        } else {
+            "=== STDERR (Retained buffer: ${stderr.length} chars) ==="
+        }
+        obsFile.writeText("$stdoutHeader\n$stdout\n\n$stderrHeader\n$stderr\n")
         return resolver.toLogicalPath(obsFile)
     }
 
@@ -184,29 +194,104 @@ class ContextManager(
             val callName = if (toolName.isNotBlank()) toolName else result.toolName
             val callArgs = if (result.argumentsJson.isNotBlank() && result.argumentsJson != "{}") result.argumentsJson else "{}"
 
+            val isParseFailure = result.errorType == "PARSE_FAILURE" || callName == "[PARSE_FAILURE]" || callName == "parse_tool_call"
+            if (isParseFailure) {
+                // Structured internal parse-failure observation: NOT a fake executable tool
+                val parseFailureObservation = buildString {
+                    appendLine("=== PARSE_FAILURE OBSERVATION ===")
+                    appendLine("Terminal State: PARSE_FAILURE")
+                    appendLine("Reason: ${result.errorMessage ?: "Malformed tool call syntax"}")
+                    if (result.stderr.isNotBlank()) {
+                        appendLine("Details:\n${result.stderr}")
+                    }
+                    appendLine("Directive: The previous model response attempted a tool invocation but failed to parse. No action was executed and no side effects occurred. Do not attempt to invoke 'parse_tool_call'. Format your next tool call using valid structured JSON or tags.")
+                }
+                messages.add(
+                    LlmMessage(
+                        role = LlmRole.USER,
+                        content = parseFailureObservation
+                    )
+                )
+                continue
+            }
+
+            val canonicalName = com.example.aragon.tools.ToolRegistry.resolveCanonicalToolName(callName)
+            val terminalState = when {
+                result.errorType == "PROCESS_TERMINATED" && result.terminationReason == "PROCESS_DIED_BEFORE_RESULT" -> "UNKNOWN_AFTER_PROCESS_DEATH"
+                result.errorType == "PROCESS_TERMINATED" -> "PROCESS_TERMINATED"
+                result.status == com.example.aragon.domain.model.ToolExecutionStatus.AWAITING_APPROVAL || result.terminationReason == "AWAITING_APPROVAL" -> "AWAITING_APPROVAL"
+                result.errorType == "OPENSANDBOX_SYNC_FAILED" -> "SANDBOX_SYNC_FAILURE"
+                result.errorType?.startsWith("OPENSANDBOX") == true -> "SANDBOX_FAILURE"
+                result.errorType == "MCP_ERROR" -> "MCP_FAILURE"
+                result.errorType == "ARTIFACT_INVALID" || result.errorType == "STALE_ARTIFACT" -> "ARTIFACT_INVALID"
+                result.cancelled || result.status == com.example.aragon.domain.model.ToolExecutionStatus.CANCELLED -> "CANCELLED"
+                result.success || result.status == com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED -> "SUCCEEDED"
+                else -> "FAILED"
+            }
+
             val observationContent = buildString {
                 appendLine("=== TOOL OBSERVATION ===")
                 appendLine("Tool Call ID: ${result.callId}")
                 appendLine("Tool: $callName")
+                appendLine("Canonical Tool: $canonicalName")
                 if (callArgs != "{}") {
-                    appendLine("Arguments: $callArgs")
+                    appendLine("Normalized Arguments: $callArgs")
                 }
                 appendLine("Environment: ${result.environment} (${result.workingDirectory})")
-                appendLine("Status: ${result.status.name} (Success: ${result.success}, ExitCode: ${result.exitCode})")
+                appendLine("Terminal State: $terminalState")
+                val exitCodeDisplay = if (terminalState == "UNKNOWN_AFTER_PROCESS_DEATH") "None (Unobserved - Process Died Before Result)" else "${result.exitCode}"
+                appendLine("Status: ${result.status.name} (Success: ${result.success}, ExitCode: $exitCodeDisplay)")
+                if (!result.terminationReason.isNullOrBlank()) {
+                    appendLine("Termination Reason: ${result.terminationReason}")
+                }
                 if (result.durationMs > 0) {
                     appendLine("Duration: ${result.durationMs}ms")
                 }
-                if (result.artifacts.isNotEmpty()) {
-                    appendLine("Artifacts Produced: ${result.artifacts.joinToString()}")
-                }
-                if (result.stdout.isNotBlank()) {
-                    appendLine("STDOUT (truncated):\n${result.stdout.take(maxInlineOutputLength)}")
-                }
-                if (result.stderr.isNotBlank()) {
-                    appendLine("STDERR (truncated):\n${result.stderr.take(maxInlineOutputLength)}")
+                if (!result.errorType.isNullOrBlank()) {
+                    appendLine("Error Type: ${result.errorType}")
                 }
                 if (!result.errorMessage.isNullOrBlank()) {
-                    appendLine("Error: ${result.errorMessage}")
+                    appendLine("Error Message: ${result.errorMessage}")
+                }
+                if (terminalState == "UNKNOWN_AFTER_PROCESS_DEATH") {
+                    appendLine("Notice: Host process died before tool execution result was observed. State of external side-effects is unconfirmed.")
+                }
+                if (result.artifacts.isNotEmpty()) {
+                    appendLine("Artifacts Produced: ${result.artifacts.joinToString()}")
+                    val diskVerification = result.artifacts.map { p ->
+                        val f = resolver.resolve(p)
+                        if (f.exists() && f.isFile) "$p (verified: ${f.length()}B)" else "$p (MISSING ON DISK)"
+                    }.joinToString("; ")
+                    appendLine("Artifact Verification: $diskVerification")
+                }
+                appendLine("Timestamp: ${result.completedAt}")
+                if (result.stdout.isNotBlank()) {
+                    val wasCappedAtCapture = result.stdout.contains("[STDOUT Capped") || result.stdout.contains("[STDOUT Truncated")
+                    val outTrunc = if (result.stdout.length > maxInlineOutputLength) {
+                        val storageNote = if (wasCappedAtCapture) {
+                            "Retained diagnostic buffer (${result.stdout.length} chars) stored in obs_${result.callId}.log (original process output exceeded retention limit)"
+                        } else {
+                            "Complete retained output (${result.stdout.length} chars) stored in obs_${result.callId}.log"
+                        }
+                        "${result.stdout.take(maxInlineOutputLength)}\n...[Inline output truncated at $maxInlineOutputLength chars. $storageNote]"
+                    } else {
+                        result.stdout
+                    }
+                    appendLine("STDOUT:\n$outTrunc")
+                }
+                if (result.stderr.isNotBlank()) {
+                    val wasCappedAtCapture = result.stderr.contains("[STDERR Capped") || result.stderr.contains("[STDERR Truncated")
+                    val errTrunc = if (result.stderr.length > maxInlineOutputLength) {
+                        val storageNote = if (wasCappedAtCapture) {
+                            "Retained error buffer (${result.stderr.length} chars) stored in obs_${result.callId}.log (stream exceeded retention limit)"
+                        } else {
+                            "Complete retained error (${result.stderr.length} chars) stored in obs_${result.callId}.log"
+                        }
+                        "${result.stderr.take(maxInlineOutputLength)}\n...[Inline error truncated at $maxInlineOutputLength chars. $storageNote]"
+                    } else {
+                        result.stderr
+                    }
+                    appendLine("STDERR:\n$errTrunc")
                 }
             }
 

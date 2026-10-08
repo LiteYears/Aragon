@@ -266,25 +266,37 @@ data class ToolExecutionEntity(
     val status: String = if (success) "SUCCEEDED" else "FAILED",
     val artifacts: List<String> = emptyList()
 ) {
-    fun toDomainResult(): ToolResult = ToolResult(
-        callId = callId,
-        taskId = taskId,
-        success = success,
-        exitCode = exitCode,
-        stdout = stdout,
-        stderr = stderr,
-        durationMs = durationMs,
-        workingDirectory = workingDirectory,
-        errorType = errorType,
-        errorMessage = errorMessage,
-        startedAt = startedAt,
-        completedAt = completedAt,
-        toolName = toolName,
-        argumentsJson = argumentsJson,
-        artifacts = artifacts,
-        status = runCatching { com.example.aragon.domain.model.ToolExecutionStatus.valueOf(status) }
-            .getOrDefault(if (success) com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED else com.example.aragon.domain.model.ToolExecutionStatus.FAILED)
-    )
+    fun toDomainResult(): ToolResult {
+        val termReason = when {
+            errorType == "PROCESS_TERMINATED" && exitCode == -1 -> "PROCESS_DIED_BEFORE_RESULT"
+            errorType == "AWAITING_APPROVAL" || status == "AWAITING_APPROVAL" -> "AWAITING_APPROVAL"
+            errorType == "APPROVAL_DENIED" -> "APPROVAL_DENIED"
+            status == "CANCELLED" -> "CANCELLED"
+            else -> null
+        }
+        val isCancelled = status == "CANCELLED" || status == "AWAITING_APPROVAL"
+        return ToolResult(
+            callId = callId,
+            taskId = taskId,
+            success = success,
+            exitCode = exitCode,
+            stdout = stdout,
+            stderr = stderr,
+            durationMs = durationMs,
+            workingDirectory = workingDirectory,
+            errorType = errorType,
+            errorMessage = errorMessage,
+            startedAt = startedAt,
+            completedAt = completedAt,
+            toolName = toolName,
+            argumentsJson = argumentsJson,
+            artifacts = artifacts,
+            cancelled = isCancelled,
+            terminationReason = termReason,
+            status = runCatching { com.example.aragon.domain.model.ToolExecutionStatus.valueOf(status) }
+                .getOrDefault(if (isCancelled) com.example.aragon.domain.model.ToolExecutionStatus.CANCELLED else if (success) com.example.aragon.domain.model.ToolExecutionStatus.SUCCEEDED else com.example.aragon.domain.model.ToolExecutionStatus.FAILED)
+        )
+    }
 }
 
 @Entity(tableName = "timeline_events")

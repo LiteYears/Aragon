@@ -1,6 +1,9 @@
 package com.example.aragon.computer
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
@@ -59,20 +62,28 @@ class ProcessManager(
         }
 
         // Try direct Process execution first
-        val result = runCatching {
+        val result = try {
             executeViaSystemProcess(command, workingDir, timeoutMs, environment, startTime)
-        }.getOrNull()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
 
-        if (result != null && (result.exitCode == 0 || result.stderr.isNotBlank() || result.stdout.isNotBlank())) {
+        if (result != null) {
             return@withContext result
         }
 
-        // Fallback to built-in POSIX command interpreter if system process cannot execute
+        if (!currentCoroutineContext().isActive) {
+            throw CancellationException("Command execution cancelled")
+        }
+
+        // Fallback to built-in POSIX command interpreter only if system process could not be spawned
         executeBuiltinCommand(command, workingDir, startTime)
     }
 
 
-    private fun executeViaSystemProcess(
+    private suspend fun executeViaSystemProcess(
         command: String,
         workingDir: File,
         timeoutMs: Long,
@@ -98,15 +109,26 @@ class ProcessManager(
         try {
             process = processBuilder.start()
 
+            val maxBufferChars = 500_000
             val stdoutBuilder = StringBuilder()
             val stderrBuilder = StringBuilder()
+            var stdoutTruncated = false
+            var stderrTruncated = false
+            var totalStdoutCharsRead = 0L
+            var totalStderrCharsRead = 0L
 
             val stdoutThread = Thread {
                 runCatching {
                     BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
                         var line: String?
                         while (reader.readLine().also { line = it } != null) {
-                            stdoutBuilder.append(line).append("\n")
+                            totalStdoutCharsRead += line!!.length + 1
+                            if (stdoutBuilder.length < maxBufferChars) {
+                                stdoutBuilder.append(line).append("\n")
+                            } else if (!stdoutTruncated) {
+                                stdoutTruncated = true
+                                stdoutBuilder.append("\n[STDOUT Capped: output stream exceeded in-memory retention buffer ($maxBufferChars chars). Stream drained to prevent process blocking. Total streamed: ${totalStdoutCharsRead}+ chars]\n")
+                            }
                         }
                     }
                 }
@@ -117,7 +139,13 @@ class ProcessManager(
                     BufferedReader(InputStreamReader(process.errorStream)).use { reader ->
                         var line: String?
                         while (reader.readLine().also { line = it } != null) {
-                            stderrBuilder.append(line).append("\n")
+                            totalStderrCharsRead += line!!.length + 1
+                            if (stderrBuilder.length < maxBufferChars) {
+                                stderrBuilder.append(line).append("\n")
+                            } else if (!stderrTruncated) {
+                                stderrTruncated = true
+                                stderrBuilder.append("\n[STDERR Capped: error stream exceeded in-memory retention buffer ($maxBufferChars chars). Stream drained to prevent process blocking. Total streamed: ${totalStderrCharsRead}+ chars]\n")
+                            }
                         }
                     }
                 }
@@ -126,7 +154,22 @@ class ProcessManager(
             stdoutThread.start()
             stderrThread.start()
 
-            val completed = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            var elapsed = 0L
+            var completed = false
+            while (elapsed < timeoutMs) {
+                if (!currentCoroutineContext().isActive) {
+                    process.destroyForcibly()
+                    stdoutThread.interrupt()
+                    stderrThread.interrupt()
+                    throw CancellationException("Command execution cancelled")
+                }
+                if (process.waitFor(100, TimeUnit.MILLISECONDS)) {
+                    completed = true
+                    break
+                }
+                elapsed += 100
+            }
+
             val duration = System.currentTimeMillis() - startTime
 
             if (!completed) {
@@ -153,6 +196,9 @@ class ProcessManager(
                 durationMs = duration,
                 workingDirectory = workingDir.absolutePath
             )
+        } catch (e: CancellationException) {
+            process?.destroyForcibly()
+            throw e
         } catch (e: Exception) {
             process?.destroyForcibly()
             return null
@@ -398,7 +444,7 @@ class ProcessManager(
                 ProcessExecutionResult(
                     exitCode = 127,
                     stdout = "",
-                    stderr = "sh: $program: command executed via Aragon POSIX fallback (exit code 0 simulated or not found)",
+                    stderr = "sh: $program: command not found",
                     durationMs = System.currentTimeMillis() - startTime,
                     workingDirectory = workingDir.absolutePath
                 )

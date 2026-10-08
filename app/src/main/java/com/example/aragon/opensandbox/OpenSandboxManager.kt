@@ -99,11 +99,14 @@ class OpenSandboxManager(
         )
 
         execResult.getOrElse { err ->
+            val isTimeout = err is java.net.SocketTimeoutException ||
+                err.message?.contains("timed out", ignoreCase = true) == true ||
+                err.message?.contains("timeout", ignoreCase = true) == true
             OpenSandboxExecResult(
-                exitCode = 1,
+                exitCode = if (isTimeout) 124 else 1,
                 stdout = "",
                 stderr = "OpenSandbox execution error: ${err.message}",
-                durationMs = 0L,
+                durationMs = timeoutMs,
                 isEmulated = false
             )
         }
@@ -127,11 +130,14 @@ class OpenSandboxManager(
         )
 
         codeResult.getOrElse { err ->
+            val isTimeout = err is java.net.SocketTimeoutException ||
+                err.message?.contains("timed out", ignoreCase = true) == true ||
+                err.message?.contains("timeout", ignoreCase = true) == true
             OpenSandboxCodeResult(
-                exitCode = 1,
+                exitCode = if (isTimeout) 124 else 1,
                 stdout = "",
                 stderr = "OpenSandbox code execution error: ${err.message}",
-                durationMs = 0L,
+                durationMs = timeoutMs,
                 isEmulated = false
             )
         }
@@ -177,60 +183,99 @@ class OpenSandboxManager(
         }
     }
 
-    suspend fun syncSandboxToLocal(resolver: com.example.aragon.computer.WorkspacePathResolver): List<java.io.File> = withContext(Dispatchers.IO) {
-        val sandboxId = _activeSandbox.value?.id ?: preferencesManager.openSandboxActiveId.value ?: "osb_default"
+    suspend fun syncSandboxToLocalDetailed(resolver: com.example.aragon.computer.WorkspacePathResolver): OpenSandboxSyncResult = withContext(Dispatchers.IO) {
+        val current = _activeSandbox.value
+        val sandboxId = current?.id ?: preferencesManager.openSandboxActiveId.value ?: "osb_default"
         val synced = mutableListOf<java.io.File>()
+        val failedPaths = mutableListOf<String>()
 
         // 1. Sync from memory / emulated sandbox filesystem
         val emulated = client.getAllEmulatedFiles(sandboxId)
         for ((logicalPath, content) in emulated) {
-            val target = resolver.resolve(logicalPath)
-            val ext = target.extension.lowercase()
-            val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
-            if (isBinary) {
-                // NEVER clobber an existing local binary file with plain text!
-                if (target.exists() && target.length() > 50) {
-                    continue
+            try {
+                val target = resolver.resolve(logicalPath)
+                val ext = target.extension.lowercase()
+                val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
+                if (isBinary) {
+                    // NEVER clobber an existing local binary file with plain text!
+                    if (target.exists() && target.length() > 50) {
+                        continue
+                    }
+                    if (content.contains("OpenXML") || content.contains("Placeholder")) {
+                        continue
+                    }
                 }
-                if (content.contains("OpenXML") || content.contains("Placeholder")) {
-                    continue
+                target.parentFile?.mkdirs()
+                if (!target.exists() || (!isBinary && target.isFile && target.readText() != content)) {
+                    target.writeText(content, Charsets.UTF_8)
+                    synced.add(target)
                 }
-            }
-            target.parentFile?.mkdirs()
-            if (!target.exists() || (!isBinary && target.isFile && target.readText() != content)) {
-                target.writeText(content, Charsets.UTF_8)
-                synced.add(target)
+            } catch (e: Exception) {
+                failedPaths.add(logicalPath)
             }
         }
 
         // 2. If connected to a live cluster, query and sync live workspace files
-        val current = _activeSandbox.value
         if (current != null && !current.isEmulated) {
             val serverUrl = preferencesManager.openSandboxServerUrl.value
             val apiKey = preferencesManager.openSandboxApiKey.value
             val findRes = client.executeCommand(serverUrl, apiKey, current.id, "find /workspace -type f -not -path '*/.*' -not -path '*/__pycache__*'", "/workspace")
-            findRes.onSuccess { exec ->
+            if (findRes.isFailure) {
+                val err = findRes.exceptionOrNull()?.message ?: "Failed to list workspace files"
+                return@withContext OpenSandboxSyncResult(
+                    isSuccess = false,
+                    syncedFiles = synced,
+                    failedPaths = failedPaths,
+                    errorMessage = "Cluster unreachable during file sync: $err"
+                )
+            }
+            val exec = findRes.getOrNull()
+            if (exec != null && exec.exitCode == 0) {
                 val lines = exec.stdout.lines().map { it.trim() }.filter { it.startsWith("/workspace/") }
                 for (p in lines) {
                     val readRes = client.readFile(serverUrl, apiKey, current.id, p)
                     readRes.onSuccess { content ->
-                        val target = resolver.resolve(p)
-                        val ext = target.extension.lowercase()
-                        val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
-                        if (isBinary && target.exists() && target.length() > 50) {
-                            return@onSuccess
+                        try {
+                            val target = resolver.resolve(p)
+                            val ext = target.extension.lowercase()
+                            val isBinary = ext in listOf("docx", "xlsx", "pdf", "zip", "apk", "png", "jpg", "jpeg")
+                            if (isBinary && target.exists() && target.length() > 50) {
+                                return@onSuccess
+                            }
+                            target.parentFile?.mkdirs()
+                            if (!target.exists() || (!isBinary && target.isFile && target.readText() != content)) {
+                                target.writeText(content, Charsets.UTF_8)
+                                synced.add(target)
+                            }
+                        } catch (e: Exception) {
+                            failedPaths.add(p)
                         }
-                        target.parentFile?.mkdirs()
-                        if (!target.exists() || (!isBinary && target.isFile && target.readText() != content)) {
-                            target.writeText(content, Charsets.UTF_8)
-                            synced.add(target)
-                        }
+                    }.onFailure {
+                        failedPaths.add(p)
                     }
                 }
+            } else if (exec != null && exec.exitCode != 0) {
+                return@withContext OpenSandboxSyncResult(
+                    isSuccess = false,
+                    syncedFiles = synced,
+                    failedPaths = failedPaths,
+                    errorMessage = "File discovery failed inside sandbox microVM: ${exec.stderr}"
+                )
             }
         }
 
-        synced
+        val isSuccess = failedPaths.isEmpty()
+        val errMsg = if (!isSuccess) "Failed to sync ${failedPaths.size} paths: ${failedPaths.take(5).joinToString()}" else null
+        OpenSandboxSyncResult(
+            isSuccess = isSuccess,
+            syncedFiles = synced,
+            failedPaths = failedPaths,
+            errorMessage = errMsg
+        )
+    }
+
+    suspend fun syncSandboxToLocal(resolver: com.example.aragon.computer.WorkspacePathResolver): List<java.io.File> {
+        return syncSandboxToLocalDetailed(resolver).syncedFiles
     }
 }
 

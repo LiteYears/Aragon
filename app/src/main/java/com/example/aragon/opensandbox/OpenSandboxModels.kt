@@ -60,3 +60,10 @@ data class OpenSandboxHealth(
     val backendType: ExecutionBackend = ExecutionBackend.OPEN_SANDBOX,
     val isLiveServer: Boolean = false
 )
+
+data class OpenSandboxSyncResult(
+    val isSuccess: Boolean,
+    val syncedFiles: List<java.io.File> = emptyList(),
+    val failedPaths: List<String> = emptyList(),
+    val errorMessage: String? = null
+)

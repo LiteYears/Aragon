@@ -12,9 +12,33 @@ class ToolRegistry {
         tools[tool.name] = tool
     }
 
-    fun getTool(name: String): ToolDefinition? = tools[name]
+    fun getTool(name: String): ToolDefinition? = tools[name] ?: tools[resolveCanonicalToolName(name)]
 
     fun getAllTools(): List<ToolDefinition> = tools.values.toList()
+
+    companion object {
+        fun resolveCanonicalToolName(name: String): String {
+            val lower = name.trim().lowercase()
+            return when (lower) {
+                "bash", "sh", "shell", "terminal" -> "run_command"
+                "python", "python3" -> "python_execute"
+                "read_file", "cat" -> "file_read"
+                "write_file" -> "file_write"
+                "delete_file", "remove_file" -> "file_delete"
+                "move_file", "rename_file" -> "file_move"
+                "copy_file" -> "file_copy"
+                "create_directory", "make_directory", "mkdir" -> "directory_create"
+                "list_files", "dir", "ls" -> "file_list"
+                "search_file", "find_files" -> "search_files"
+                "fetch_web" -> "web_fetch"
+                "create_document", "docx_generate" -> "document_create"
+                "create_spreadsheet", "xlsx_create" -> "spreadsheet_create"
+                "edit_file" -> "file_patch"
+                "parse_tool_call", "[parse_failure]" -> "unknown_tool"
+                else -> lower
+            }
+        }
+    }
 
     private fun registerDefaultTools() {
         register(
@@ -361,16 +385,6 @@ class ToolRegistry {
             )
         )
 
-        register(
-            ToolDefinition(
-                name = "web_search",
-                description = "Search the public web for real-time information, documentation, packages, and technical specifications with ranked search snippets.",
-                parameters = listOf(
-                    ToolParameter("query", "string", "The search query keywords", required = true)
-                ),
-                permission = ToolPermission.SAFE
-            )
-        )
 
         register(
             ToolDefinition(
