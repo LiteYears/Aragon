@@ -129,7 +129,7 @@ class Replanner {
                     )
                     else -> ReplanDecision(
                         type = ReplanDecisionType.CHANGE_STRATEGY,
-                        explanation = "Python missing external library. Executing via standard library or pure bash POSIX builtins.",
+                        explanation = "Switching strategy: Python missing external dependency ($err). Executing via standard library or pure bash POSIX builtins.",
                         suggestedTool = "run_command",
                         suggestedIntent = "Execute using standard library or POSIX command line."
                     )

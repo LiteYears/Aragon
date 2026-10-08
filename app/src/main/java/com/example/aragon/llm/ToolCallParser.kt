@@ -317,7 +317,19 @@ object ToolCallParser {
                 lower.contains("i ran the command") ||
                 lower.contains("file created:") ||
                 lower.contains("created file:") ||
-                lower.contains("successfully generated")
+                lower.contains("successfully generated") ||
+                lower.contains("i will now create") ||
+                lower.contains("i will now") ||
+                lower.contains("i will create") ||
+                lower.contains("i will execute") ||
+                lower.contains("will now create") ||
+                lower.contains("will create the") ||
+                lower.contains("execute the analysis") ||
+                lower.contains("i will run") ||
+                lower.contains("i'll create") ||
+                lower.contains("i'll execute") ||
+                lower.contains("i will generate") ||
+                lower.contains("i am going to create")
         return claimsAction
     }
 

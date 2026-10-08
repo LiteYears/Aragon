@@ -342,7 +342,8 @@ class ContextManager(
             appendLine("Iterations Completed: ${task.iteration}")
             appendLine("Messages Count: ${messages.size}")
             appendLine("\n## Key Decisions and Failures:")
-            getFailedApproaches(task.id).forEach {
+            val failures = (getFailedApproaches(task.id) + getFailedApproaches("default")).distinctBy { it.id }
+            failures.forEach {
                 appendLine("- Failed: ${it.strategy} (${it.error})")
             }
         }
