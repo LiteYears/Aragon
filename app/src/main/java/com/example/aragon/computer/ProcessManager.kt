@@ -335,6 +335,56 @@ class ProcessManager(
                 val output = files.joinToString("\n") { it.relativeTo(workingDir).path }
                 ProcessExecutionResult(0, output, "", 2, workingDir.absolutePath)
             }
+            "head" -> {
+                val linesCount = args.find { it.startsWith("-n") }?.removePrefix("-n")?.toIntOrNull() ?: 10
+                val targetName = args.lastOrNull { !it.startsWith("-") }
+                val targetFile = targetName?.let { File(workingDir, it) }
+                if (targetFile != null && targetFile.exists()) {
+                    val content = targetFile.readLines().take(linesCount).joinToString("\n")
+                    ProcessExecutionResult(0, content, "", 1, workingDir.absolutePath)
+                } else {
+                    ProcessExecutionResult(1, "", "head: cannot open '$targetName': No such file or directory", 1, workingDir.absolutePath)
+                }
+            }
+            "tail" -> {
+                val linesCount = args.find { it.startsWith("-n") }?.removePrefix("-n")?.toIntOrNull() ?: 10
+                val targetName = args.lastOrNull { !it.startsWith("-") }
+                val targetFile = targetName?.let { File(workingDir, it) }
+                if (targetFile != null && targetFile.exists()) {
+                    val content = targetFile.readLines().takeLast(linesCount).joinToString("\n")
+                    ProcessExecutionResult(0, content, "", 1, workingDir.absolutePath)
+                } else {
+                    ProcessExecutionResult(1, "", "tail: cannot open '$targetName': No such file or directory", 1, workingDir.absolutePath)
+                }
+            }
+            "wc" -> {
+                val targetName = args.lastOrNull { !it.startsWith("-") }
+                val targetFile = targetName?.let { File(workingDir, it) }
+                if (targetFile != null && targetFile.exists()) {
+                    val text = targetFile.readText()
+                    val lines = text.lines().size
+                    val words = text.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+                    val bytes = targetFile.length()
+                    ProcessExecutionResult(0, "$lines $words $bytes $targetName", "", 1, workingDir.absolutePath)
+                } else {
+                    ProcessExecutionResult(1, "", "wc: $targetName: No such file or directory", 1, workingDir.absolutePath)
+                }
+            }
+            "env", "printenv" -> {
+                val envStr = "HOME=${workingDir.absolutePath}\nUSER=aragon\nSHELL=/bin/sh\nPATH=/system/bin:/bin:/usr/bin\nWORKSPACE=/workspace"
+                ProcessExecutionResult(0, envStr, "", 1, workingDir.absolutePath)
+            }
+            "uname" -> {
+                ProcessExecutionResult(0, "Linux aragon-sandbox 5.15.0-generic aarch64 Android", "", 1, workingDir.absolutePath)
+            }
+            "df" -> {
+                val dfOut = "Filesystem     1K-blocks    Used Available Use% Mounted on\n/dev/root       10485760  245760  10240000   3% /workspace"
+                ProcessExecutionResult(0, dfOut, "", 1, workingDir.absolutePath)
+            }
+            "free" -> {
+                val freeOut = "               total        used        free      shared  buff/cache   available\nMem:         4194304      524288     3670016        8192      262144     3670016"
+                ProcessExecutionResult(0, freeOut, "", 1, workingDir.absolutePath)
+            }
             "which" -> {
                 val binary = args.firstOrNull() ?: ""
                 val found = when (binary) {

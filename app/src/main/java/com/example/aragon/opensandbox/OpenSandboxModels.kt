@@ -35,6 +35,20 @@ data class OpenSandboxFileEntry(
     val size: Long
 )
 
+data class OpenSandboxSystemMetrics(
+    val cpuPercent: Double = 0.0,
+    val memoryUsedMb: Long = 0L,
+    val memoryTotalMb: Long = 2048L,
+    val diskUsedMb: Long = 0L,
+    val diskTotalMb: Long = 10240L,
+    val runningProcesses: Int = 1
+)
+
+data class OpenSandboxPackageInfo(
+    val name: String,
+    val version: String
+)
+
 data class OpenSandboxHealth(
     val isAvailable: Boolean,
     val serverUrl: String,

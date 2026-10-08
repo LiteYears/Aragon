@@ -233,10 +233,78 @@ class ToolRegistry {
         register(
             ToolDefinition(
                 name = "sandbox_manage",
-                description = "Manage isolated OpenSandbox microVM/container instances (inspect health/status, spawn custom container image, or terminate).",
+                description = "Manage isolated OpenSandbox microVM/container instances (inspect health/status, spawn custom container image, inspect metrics, or terminate).",
                 parameters = listOf(
-                    ToolParameter("action", "string", "Action to perform: 'status', 'spawn', 'terminate'", required = true),
+                    ToolParameter("action", "string", "Action to perform: 'status', 'spawn', 'metrics', 'packages', 'terminate'", required = true),
                     ToolParameter("image", "string", "Optional container image (e.g. 'opensandbox/python:3.12', 'ubuntu:22.04')", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "spreadsheet_create",
+                description = "Create a structured, validated OpenXML XLSX spreadsheet workbook deliverable with sheets, column headers, and data rows. Automatically saves to /artifacts/<filename>.xlsx",
+                parameters = listOf(
+                    ToolParameter("filename", "string", "Destination filename or logical path (e.g. /artifacts/metrics.xlsx or data.xlsx)", required = true),
+                    ToolParameter("sheetName", "string", "Title of the primary worksheet (default: 'Sheet1')", required = false),
+                    ToolParameter("headers", "string", "Column headers (JSON array of strings or comma-separated list)", required = true),
+                    ToolParameter("rows", "string", "Data rows (JSON array of row arrays or comma-separated rows)", required = true)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "json_query",
+                description = "Query, extract, or filter fields in JSON files or JSON strings using JSONPath / key selector.",
+                parameters = listOf(
+                    ToolParameter("path", "string", "Logical path to the JSON file (or provide 'jsonContent')", required = false),
+                    ToolParameter("jsonContent", "string", "Raw JSON string if not reading from file", required = false),
+                    ToolParameter("query", "string", "Key path or query (e.g. 'metrics.latency', 'items[0].id')", required = true)
+                ),
+                permission = ToolPermission.SAFE
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "csv_analyze",
+                description = "Parse, inspect columns, calculate summary statistics (count, sum, mean, min, max), and query records in CSV data files.",
+                parameters = listOf(
+                    ToolParameter("path", "string", "Logical path to the CSV file (e.g. /workspace/data.csv)", required = true),
+                    ToolParameter("column", "string", "Optional specific column name for numeric aggregation", required = false),
+                    ToolParameter("limit", "integer", "Number of preview rows (default: 10)", required = false)
+                ),
+                permission = ToolPermission.SAFE
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "http_request",
+                description = "Send custom HTTP/REST requests (GET, POST, PUT, DELETE) with custom headers, query params, and request body.",
+                parameters = listOf(
+                    ToolParameter("url", "string", "Target HTTP or HTTPS URL", required = true),
+                    ToolParameter("method", "string", "HTTP method: GET, POST, PUT, DELETE, HEAD (default: GET)", required = false),
+                    ToolParameter("headers", "string", "JSON object of HTTP headers", required = false),
+                    ToolParameter("body", "string", "Request body payload for POST/PUT", required = false)
+                ),
+                permission = ToolPermission.NORMAL
+            )
+        )
+
+        register(
+            ToolDefinition(
+                name = "archive_manage",
+                description = "Create or extract ZIP archives of workspace files and deliverables.",
+                parameters = listOf(
+                    ToolParameter("operation", "string", "Archive operation: 'create_zip' or 'extract_zip'", required = true),
+                    ToolParameter("archivePath", "string", "Logical path of zip file (e.g. /artifacts/bundle.zip)", required = true),
+                    ToolParameter("sourcePaths", "string", "JSON array or comma-separated list of paths to include (for create_zip)", required = false),
+                    ToolParameter("destinationDir", "string", "Destination directory to extract into (for extract_zip)", required = false)
                 ),
                 permission = ToolPermission.NORMAL
             )

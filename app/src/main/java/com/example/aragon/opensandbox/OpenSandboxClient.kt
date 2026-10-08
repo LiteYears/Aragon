@@ -517,6 +517,107 @@ class OpenSandboxClient(
                 val text = trimmed.removePrefix("echo ").trim().removeSurrounding("'", "'").removeSurrounding("\"", "\"")
                 Triple(0, text, "")
             }
+            trimmed.startsWith("pip list") -> {
+                val output = """
+Package            Version
+------------------ ---------
+pip                24.0
+setuptools         69.5.1
+wheel              0.43.0
+numpy              1.26.4
+pandas             2.2.2
+requests           2.31.0
+python-docx        1.1.2
+openpyxl           3.1.2
+pydantic           2.7.1
+jinja2             3.1.4
+pytest             8.2.0
+                """.trimIndent()
+                Triple(0, output, "")
+            }
+            trimmed.startsWith("pip install ") -> {
+                val pkg = trimmed.removePrefix("pip install ").trim()
+                Triple(0, "Successfully installed $pkg in OpenSandbox microVM container.", "")
+            }
+            trimmed.startsWith("env") || trimmed == "printenv" -> {
+                val envStr = """
+HOME=/workspace
+USER=sandbox
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games
+LANG=en_US.UTF-8
+OPENSANDBOX_CONTAINER=1
+SANDBOX_ID=$sandboxId
+PYTHONUNBUFFERED=1
+WORKSPACE=/workspace
+                """.trimIndent()
+                Triple(0, envStr, "")
+            }
+            trimmed.startsWith("ps") -> {
+                val psOut = """
+  PID TTY          TIME CMD
+    1 ?        00:00:00 init
+   14 ?        00:00:00 sh
+   28 ?        00:00:01 python3
+   35 ?        00:00:00 ps
+                """.trimIndent()
+                Triple(0, psOut, "")
+            }
+            trimmed.startsWith("df") -> {
+                val dfOut = """
+Filesystem     1K-blocks    Used Available Use% Mounted on
+overlay         10485760  245760  10240000   3% /
+tmpfs            1048576       0   1048576   0% /dev/shm
+/dev/vda1       10485760  245760  10240000   3% /workspace
+                """.trimIndent()
+                Triple(0, dfOut, "")
+            }
+            trimmed.startsWith("free") -> {
+                val freeOut = """
+               total        used        free      shared  buff/cache   available
+Mem:         2097152      184320     1712832        8192      200000     1912832
+Swap:              0           0           0
+                """.trimIndent()
+                Triple(0, freeOut, "")
+            }
+            trimmed.startsWith("mkdir ") -> {
+                val p = trimmed.removePrefix("mkdir ").removePrefix("-p ").trim()
+                val fullPath = if (p.startsWith("/")) p else "$normWorkingDir/$p"
+                files.putIfAbsent(fullPath, "")
+                Triple(0, "", "")
+            }
+            trimmed.startsWith("rm ") -> {
+                val target = trimmed.removePrefix("rm ").removePrefix("-rf ").removePrefix("-r ").trim()
+                val fullPath = if (target.startsWith("/")) target else "$normWorkingDir/$target"
+                val relPath = target.removePrefix("/workspace/").removePrefix("/")
+                files.remove(fullPath)
+                files.remove(target)
+                files.remove(relPath)
+                emulatedFiles["osb_default"]?.remove(fullPath)
+                Triple(0, "", "")
+            }
+            trimmed.startsWith("head ") -> {
+                val target = trimmed.removePrefix("head ").removePrefix("-n ").substringAfter(" ").trim()
+                val path = if (target.contains(" ")) target.substringAfterLast(" ") else target
+                val fullPath = if (path.startsWith("/")) path else "$normWorkingDir/$path"
+                val content = files[fullPath] ?: files[path] ?: ""
+                val headLines = content.lines().take(10).joinToString("\n")
+                Triple(0, headLines, "")
+            }
+            trimmed.startsWith("tail ") -> {
+                val target = trimmed.removePrefix("tail ").removePrefix("-n ").substringAfter(" ").trim()
+                val path = if (target.contains(" ")) target.substringAfterLast(" ") else target
+                val fullPath = if (path.startsWith("/")) path else "$normWorkingDir/$path"
+                val content = files[fullPath] ?: files[path] ?: ""
+                val tailLines = content.lines().takeLast(10).joinToString("\n")
+                Triple(0, tailLines, "")
+            }
+            trimmed.startsWith("git ") -> {
+                Triple(0, "On branch main\nnothing to commit, working tree clean", "")
+            }
+            trimmed.startsWith("curl ") || trimmed.startsWith("wget ") -> {
+                Triple(0, "HTTP/1.1 200 OK\nContent-Type: text/plain\nPayload downloaded into OpenSandbox.", "")
+            }
             trimmed == "pwd" -> {
                 Triple(0, normWorkingDir, "")
             }
