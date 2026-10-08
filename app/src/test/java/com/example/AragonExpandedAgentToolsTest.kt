@@ -231,7 +231,7 @@ class AragonExpandedAgentToolsTest {
     @Test
     fun `test process manager enhanced command execution with head, tail, and wc`() = runBlocking {
         val testFile = resolver.resolve("/workspace/lines.txt")
-        testFile.writeText((1..20).joinToString("\n") { "Line $it" })
+        testFile.writeText((1..20).joinToString("\n", postfix = "\n") { "Line $it" })
 
         val processManager = ProcessManager()
 

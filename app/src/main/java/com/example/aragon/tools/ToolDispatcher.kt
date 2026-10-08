@@ -117,7 +117,12 @@ class ToolDispatcher(
 
             // 3. Validate required arguments
             for (param in toolDef.parameters) {
-                if (param.required && (!args.has(param.name) || args.isNull(param.name))) {
+                val isPresent = when (param.name) {
+                    "filename" -> (args.has("filename") && !args.isNull("filename")) || (args.has("path") && !args.isNull("path"))
+                    "path" -> (args.has("path") && !args.isNull("path")) || (args.has("filename") && !args.isNull("filename"))
+                    else -> args.has(param.name) && !args.isNull(param.name)
+                }
+                if (param.required && !isPresent) {
                     val res = ToolResult(
                         callId = toolCall.id,
                         taskId = toolCall.taskId,
@@ -208,6 +213,7 @@ class ToolDispatcher(
 
             // 5. Dispatch to ToolExecutor with running notification
             onStatusChange?.invoke(ToolExecutionStatus.EXECUTING)
+            onStatusChange?.invoke(ToolExecutionStatus.RUNNING)
             val startedAt = System.currentTimeMillis()
             val result = toolExecutor.executeTool(
                 callId = toolCall.id,
